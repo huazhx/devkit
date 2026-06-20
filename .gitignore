@@ -1,0 +1,10 @@
+# Never commit the real config — it contains API keys
+subscriptions.conf
+
+# macOS
+.DS_Store
+
+# Editor temp files
+*.swp
+*.swo
+*~

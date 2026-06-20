@@ -1,0 +1,15 @@
+# Claude Code subscriptions. DO NOT COMMIT. chmod 600.
+# Format: name | base_url | auth_var | token | model | small_fast_model
+# "-" = leave unset. An all "-" entry launches plain claude (official /login).
+#
+# Copy this file to ~/.config/claude/subscriptions.conf and fill in your keys:
+#   cp subscriptions.conf.example ~/.config/claude/subscriptions.conf
+#   chmod 600 ~/.config/claude/subscriptions.conf
+#
+official|-|-|-|-|-
+
+# Example: a provider that uses ANTHROPIC_AUTH_TOKEN
+# my-provider|https://api.example.com/anthropic|ANTHROPIC_AUTH_TOKEN|sk-your-key|claude-sonnet-4-6|-
+
+# Example: a provider that uses ANTHROPIC_API_KEY
+# other|https://api.other.com/v1|ANTHROPIC_API_KEY|sk-your-key|-|-
