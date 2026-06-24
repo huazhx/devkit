@@ -1,17 +1,31 @@
 # ─── Claude Code subscription launcher ───────────────────────────────
-# Sourced from the shell rc. Subscriptions are read from $CC_SUBS_FILE
-# on every launch, so config edits take effect immediately.
+# One-time setup — source this file once:
+#
+#     source /path/to/claude-subscriptions/claude-subscriptions.sh
+#
+# That defines the `cc` command in the current shell AND appends a
+# `source` line to your shell rc (~/.bashrc by default) so every future
+# shell gets `cc` too. It is idempotent — sourcing again never duplicates.
+# After setup you only ever touch the config:  `cc edit`.
 #
 #   cc <name> [claude args…]   launch Claude Code on that subscription
 #   cc list                    show subscriptions (tokens masked)
 #   cc edit                    open the config in $EDITOR
+#   cc install | uninstall     add / remove the rc line by hand
+#
+# Opt out of auto-install:   CC_NO_AUTOINSTALL=1 source …/claude-subscriptions.sh
+# Install into another rc:   CC_RC_FILE=~/.zshrc  source …/claude-subscriptions.sh
 #
 # `cc` shadows the C compiler alias in interactive shells. If you build
-# C on this box, pick another name before the source line in your rc:
-#   CC_CMD=ccx source ~/scripts/claude-subscriptions.sh
+# C on this box, pick another name before sourcing:
+#   CC_CMD=ccx source /path/to/claude-subscriptions.sh
 
 : "${CC_SUBS_FILE:=$HOME/.config/claude/subscriptions.conf}"
 : "${CC_CMD:=cc}"
+: "${CC_RC_FILE:=$HOME/.bashrc}"
+
+_CC_MARKER='# >>> claude-subscriptions (cc) >>>'
+_CC_MARKER_END='# <<< claude-subscriptions (cc) <<<'
 
 _cc_trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
 
@@ -102,26 +116,100 @@ _cc_list() {
   fi
 }
 
+# Absolute path to this script, whether sourced or executed.
+_cc_self_path() {
+  local src="${BASH_SOURCE[0]:-$0}"
+  case "$src" in
+    /*) printf '%s\n' "$src" ;;
+    *)  local dir
+        dir="$(cd "$(dirname -- "$src")" >/dev/null 2>&1 && pwd)" || return 1
+        printf '%s/%s\n' "$dir" "$(basename -- "$src")" ;;
+  esac
+}
+
+# Append a `source <self>` line to the shell rc, once. Sets
+# _CC_INSTALLED_NOW=1 only when it actually wrote the line.
+_cc_install() {
+  _CC_INSTALLED_NOW=
+  local rc="$CC_RC_FILE" self
+  self="$(_cc_self_path)"
+  if [[ -z "$self" || ! -r "$self" ]]; then
+    >&2 echo "cc: can't resolve this script's path — add 'source <path>' to $rc by hand"
+    return 1
+  fi
+  if [[ -f "$rc" ]] && grep -qF "$_CC_MARKER" "$rc"; then
+    return 0   # already installed
+  fi
+  {
+    printf '\n%s\n'      "$_CC_MARKER"
+    printf 'source %q\n' "$self"
+    printf '%s\n'        "$_CC_MARKER_END"
+  } >> "$rc" || { >&2 echo "cc: failed to write $rc"; return 1; }
+  _CC_INSTALLED_NOW=1
+  >&2 echo "cc: launcher added to $rc"
+  return 0
+}
+
+# Remove the marker block from the shell rc.
+_cc_uninstall() {
+  local rc="$CC_RC_FILE"
+  if [[ ! -f "$rc" ]] || ! grep -qF "$_CC_MARKER" "$rc"; then
+    >&2 echo "cc: launcher not found in $rc"
+    return 0
+  fi
+  local tmp
+  tmp="$(mktemp)" || return 1
+  awk -v s="$_CC_MARKER" -v e="$_CC_MARKER_END" '
+    $0==s { skip=1; next }
+    skip && $0==e { skip=0; next }
+    !skip { print }
+  ' "$rc" > "$tmp" && cat "$tmp" > "$rc"
+  rm -f "$tmp"
+  >&2 echo "cc: launcher removed from $rc (open a new shell to finish)"
+}
+
 _cc_help() {
   echo "Usage: $CC_CMD <name> [claude args…]   launch Claude Code on a subscription"
   echo "       $CC_CMD list                    show subscriptions (tokens masked)"
   echo "       $CC_CMD edit                    edit $CC_SUBS_FILE"
+  echo "       $CC_CMD install | uninstall     add / remove the $CC_RC_FILE source line"
 }
 
 _cc_main() {
   case "${1:-}" in
     ""|list|ls)     _cc_list ;;
     edit)           _cc_ensure_config && "${EDITOR:-vi}" "$CC_SUBS_FILE" ;;
+    install)        _cc_install ;;
+    uninstall)      _cc_uninstall ;;
     help|-h|--help) _cc_help ;;
     *)              _cc_launch "$@" ;;
   esac
 }
 
+# Define the `cc` command in the current shell.
 eval "${CC_CMD}() { _cc_main \"\$@\"; }"
 
 if [[ -n "${BASH_VERSION:-}" ]]; then
   _cc_completions() {
-    COMPREPLY=($(compgen -W "list edit help $(_cc_names)" -- "${COMP_WORDS[COMP_CWORD]}"))
+    COMPREPLY=($(compgen -W "list edit install uninstall help $(_cc_names)" -- "${COMP_WORDS[COMP_CWORD]}"))
   }
   complete -F _cc_completions "$CC_CMD"
 fi
+
+# ── One-time setup ────────────────────────────────────────────────────
+# Persist ourselves to the shell rc so future shells get `cc` for free.
+# Idempotent; opt out with CC_NO_AUTOINSTALL=1.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then _cc_sourced=1; else _cc_sourced=0; fi
+
+if [[ -z "${CC_NO_AUTOINSTALL:-}" ]]; then
+  _cc_install
+  if [[ -n "${_CC_INSTALLED_NOW:-}" ]]; then
+    if (( _cc_sourced )); then
+      >&2 echo "cc: ready — run '$CC_CMD edit' to add subscriptions, then '$CC_CMD <name>'."
+    else
+      >&2 echo "cc: installed — run 'source $CC_RC_FILE' (or open a new shell), then '$CC_CMD edit'."
+    fi
+  fi
+  unset _CC_INSTALLED_NOW
+fi
+unset _cc_sourced
