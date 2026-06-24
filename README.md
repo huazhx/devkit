@@ -2,17 +2,16 @@
 
 Small tools that make life easier.
 
-## claude-subscriptions
+## Tools
 
-Manage multiple Claude Code subscriptions from one shell command.
+| Tool | What it does |
+|------|--------------|
+| [claude-subscriptions](claude-subscriptions/) | Manage multiple Claude Code subscriptions from one shell command (`cc`). Source it once and it installs itself. |
 
-```bash
-source claude-subscriptions.sh    # creates the `cc` command
-cc list                           # show subscriptions (tokens masked)
-cc <name>                         # launch Claude Code with that subscription
-cc edit                           # edit ~/.config/claude/subscriptions.conf
-```
+## Docs
 
-Config auto-created on first use. See `subscriptions.conf.example` for format.
+| Doc | What it covers |
+|-----|----------------|
+| [GitHub SSH proxy setup](docs/github-ssh-proxy-setup.md) | Reaching GitHub over SSH through an HTTP proxy via `ProxyCommand`. |
 
 *(more tools coming)*
