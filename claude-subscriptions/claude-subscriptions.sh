@@ -16,8 +16,10 @@
 # Opt out of auto-install:   CC_NO_AUTOINSTALL=1 source …/claude-subscriptions.sh
 # Install into another rc:   CC_RC_FILE=~/.zshrc  source …/claude-subscriptions.sh
 #
-# `cc` shadows the C compiler alias in interactive shells. If you build
-# C on this box, pick another name before sourcing:
+# `cc` is also the C compiler. If `cc` is an *alias* here (e.g. a ccache
+# wrapper like `alias cc='ccache cc'`), sourcing this drops that alias and
+# installs the launcher function in its place. Build C on this box and want
+# to keep the alias? Pick another name before sourcing:
 #   CC_CMD=ccx source /path/to/claude-subscriptions.sh
 
 : "${CC_SUBS_FILE:=$HOME/.config/claude/subscriptions.conf}"
@@ -187,6 +189,14 @@ _cc_main() {
 }
 
 # Define the `cc` command in the current shell.
+#
+# Drop any pre-existing alias of the same name first. A multi-word alias
+# such as `alias cc='ccache cc'` otherwise breaks the eval below: bash
+# expands the alias mid-parse into `ccache cc() { … }` and fails with
+#   syntax error near unexpected token `('
+# An alias would also shadow the function at call time. Aliases only exist
+# in interactive shells, so this is a harmless no-op everywhere else.
+unalias "$CC_CMD" 2>/dev/null || true
 eval "${CC_CMD}() { _cc_main \"\$@\"; }"
 
 if [[ -n "${BASH_VERSION:-}" ]]; then
