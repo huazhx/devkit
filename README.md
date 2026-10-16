@@ -2,6 +2,8 @@
 
 Small tools that make life easier.
 
+新机器先看 [使用指南](docs/using-devkit.md)：里面有可直接交给 Claude Code 的安装 prompt，以及手动安装、连接和更新方法。各工具按需安装。
+
 ## Tools
 
 | Tool | What it does |
@@ -29,6 +31,7 @@ python3 devkit/install-skill.py board
 
 | Doc | What it covers |
 |-----|----------------|
+| [使用 devkit](docs/using-devkit.md) | 新机器安装 prompt、board skill 的安装与调用、连接配置和后续更新。 |
 | [GitHub SSH proxy setup](docs/github-ssh-proxy-setup.md) | Reaching GitHub over SSH through an HTTP proxy via `ProxyCommand`. |
 
 *(more tools coming)*
