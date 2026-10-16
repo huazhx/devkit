@@ -1,0 +1,160 @@
+"""Exercise a freshly installed public skill against synthetic IP HTTPS."""
+import copy
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+from pathlib import Path
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class Handler(BaseHTTPRequestHandler):
+    board = {}
+    reject_write = False
+
+    def reply(self, status, payload):
+        raw = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def authorized(self):
+        if self.headers.get("Authorization") == "Bearer synthetic-test-token":
+            return True
+        self.reply(401, {"error": "invalid token"})
+        return False
+
+    def do_GET(self):
+        if self.authorized():
+            self.reply(200, self.board)
+
+    def do_PUT(self):
+        if not self.authorized():
+            return
+        incoming = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.reject_write or self.headers.get("X-Base-Saved-At") != str(self.board["savedAt"]):
+            return self.reply(409, self.board)
+        incoming["savedAt"] = self.board["savedAt"] + 1
+        type(self).board = incoming
+        self.reply(200, {"ok": True, "savedAt": incoming["savedAt"]})
+
+    def log_message(self, *args):
+        pass
+
+
+class PublicSkillTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory(prefix="devkit-board-")
+        cls.root = Path(cls.temp.name)
+
+        def openssl(*args):
+            subprocess.run(["openssl", *args], cwd=cls.root, check=True, capture_output=True)
+
+        openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj",
+                "/CN=Synthetic Test CA", "-keyout", "ca.key", "-out", "ca.crt",
+                "-addext", "basicConstraints=critical,CA:TRUE",
+                "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+        openssl("req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=127.0.0.1",
+                "-keyout", "leaf.key", "-out", "leaf.csr")
+        (cls.root / "leaf.ext").write_text("subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\n"
+            "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n"
+            "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n")
+        openssl("x509", "-req", "-in", "leaf.csr", "-CA", "ca.crt", "-CAkey", "ca.key",
+                "-CAcreateserial", "-days", "1", "-extfile", "leaf.ext", "-out", "leaf.crt")
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cls.root / "leaf.crt", cls.root / "leaf.key")
+        cls.server.socket = context.wrap_socket(cls.server.socket, server_side=True)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.url = f"https://127.0.0.1:{cls.server.server_port}"
+        cls.installed = cls.root / "installed-board"
+        cls.install(cls.installed)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=3)
+        cls.temp.cleanup()
+
+    @classmethod
+    def install(cls, destination, check=True):
+        return subprocess.run([sys.executable, str(ROOT / "install-skill.py"), "board",
+                               "--dest", str(destination)], check=check, capture_output=True, text=True)
+
+    def setUp(self):
+        Handler.board = {"version": 2, "savedAt": 123, "inbox": [], "threads": [
+            {"id": "synthetic-card", "title": "Synthetic task", "state": "ready", "priority": 1,
+             "lane": "errand", "createdAt": 1780000000000, "touchedAt": 1780000000000, "events": []}]}
+        Handler.reject_write = False
+        self.config = self.root / "client.json"
+        self.config.write_text(json.dumps({"url": self.url, "token": "synthetic-test-token",
+                                          "ca_file": str(self.root / "ca.crt")}))
+
+    def cli(self, *args, **extra):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("BOARD_")}
+        env.update(BOARD_CLIENT_CONFIG=str(self.config), **extra)
+        return subprocess.run([sys.executable, str(self.installed / "scripts/board.py"), *args],
+                              env=env, cwd=self.installed, capture_output=True, text=True)
+
+    def test_installed_skill_reads_and_writes_without_private_repository(self):
+        result = self.cli("list", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)[0]["title"], "Synthetic task")
+        literal = "测试 ' \" ; $(touch should-not-exist)\n第二行"
+        result = self.cli("note", "synthetic-card", literal)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(Handler.board["threads"][0]["events"][-1]["text"], literal)
+        self.assertFalse((self.installed / "should-not-exist").exists())
+        self.assertFalse((self.installed / "board.json").exists())
+
+    def test_cas_conflict_does_not_overwrite_server(self):
+        Handler.reject_write = True
+        before = copy.deepcopy(Handler.board)
+        result = self.cli("note", "synthetic-card", "Must not save")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("409", result.stderr)
+        self.assertEqual(Handler.board, before)
+
+    def test_invalid_trust_hostname_and_public_http_are_rejected(self):
+        config = json.loads(self.config.read_text())
+        config.pop("ca_file")
+        self.config.write_text(json.dumps(config))
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", self.cli("list").stderr)
+        mismatch = self.cli("list", BOARD_URL=self.url.replace("127.0.0.1", "localhost"),
+                            BOARD_CA_FILE=str(self.root / "ca.crt"))
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn("mismatch", mismatch.stderr)
+        self.assertIn("必须使用 HTTPS", self.cli("list", BOARD_URL="http://192.0.2.1:8765").stderr)
+
+    def test_update_preserves_config_and_refuses_unmanaged_paths(self):
+        destination = self.root / "update-test"
+        self.install(destination)
+        (destination / "SKILL.md").write_text("Old installed version")
+        before = self.config.read_bytes()
+        self.install(destination)
+        self.assertEqual((destination / "SKILL.md").read_bytes(),
+                         (ROOT / "skills/board/SKILL.md").read_bytes())
+        self.assertEqual(self.config.read_bytes(), before)
+        unmanaged = self.root / "unmanaged"
+        unmanaged.mkdir()
+        (unmanaged / "keep.txt").write_text("Keep this")
+        self.assertNotEqual(self.install(unmanaged, check=False).returncode, 0)
+        link = self.root / "existing-link"
+        link.symlink_to(unmanaged, target_is_directory=True)
+        self.assertNotEqual(self.install(link, check=False).returncode, 0)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual((unmanaged / "keep.txt").read_text(), "Keep this")
+
+
+if __name__ == "__main__":
+    unittest.main()

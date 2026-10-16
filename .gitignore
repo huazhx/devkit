@@ -1,6 +1,16 @@
 # Never commit the real config — it contains API keys
 subscriptions.conf
 
+# Local runtime files and connection credentials
+__pycache__/
+*.py[cod]
+client.json
+credentials.json
+board.json*
+*.key
+*.pem
+.env
+
 # macOS
 .DS_Store
 
