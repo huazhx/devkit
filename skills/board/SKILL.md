@@ -16,10 +16,11 @@ python3 <skill目录>/scripts/board.py show '<卡名或ID>' --events 5
 python3 <skill目录>/scripts/board.py note '<卡名或ID>' '用户的记录'
 python3 <skill目录>/scripts/board.py set '<卡名或ID>' state=done
 python3 <skill目录>/scripts/board.py inbox --list
+python3 <skill目录>/scripts/board.py ops --limit 20
 python3 <skill目录>/scripts/board.py backup-status
 ```
 
-先查所需的卡，不读取完整 `board.json`。需要历史时只取相关卡最近几条事件。写入只走 CLI，成功后页面自动刷新；连接或 CAS 冲突报错时重新核实，不写本地副本、不强制覆盖、不盲目重试写入。
+先查所需的卡，不读取完整 `board.json`。需要历史时只取相关卡最近几条事件。写入只走 CLI：每条命令是服务端的一个标准操作，只改它点名的卡或字段，成功后页面自动刷新。网络中断时 CLI 会用同一操作编号自动重试一次，服务端不会重复执行；报「刚被别处改过」时先重新读取、核实后再决定，不写本地副本、不手动重复写入。`ops --limit 20` 可查最近谁改了什么。
 
 断点和下一步只能写用户原话；确需修改时加 `--user-verbatim`。不要替用户决定未决事项。切入任务前先核对正在运行的卡，同一时刻最多一张 `running`。记录第一次出现的人、文件或结论时写清上下文，保留用户的不确定语气。
 

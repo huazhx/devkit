@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class Handler(BaseHTTPRequestHandler):
     board = {}
-    reject_write = False
+    concurrent_edit = None  # fields another writer changes between the CLI's read and its write
 
     def reply(self, status, payload):
         raw = json.dumps(payload).encode()
@@ -36,14 +36,33 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, self.board)
 
     def do_PUT(self):
+        # Whole-board uploads are gone (docs/OPS.md); a client that still sends one must fail.
+        if self.authorized():
+            self.reply(410, {"error": "gone", "detail": "use POST /api/ops"})
+
+    def do_POST(self):
         if not self.authorized():
             return
-        incoming = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        if self.reject_write or self.headers.get("X-Base-Saved-At") != str(self.board["savedAt"]):
-            return self.reply(409, self.board)
-        incoming["savedAt"] = self.board["savedAt"] + 1
-        type(self).board = incoming
-        self.reply(200, {"ok": True, "savedAt": incoming["savedAt"]})
+        if self.path != "/api/ops":
+            return self.reply(404, {"error": "not_found", "detail": self.path})
+        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        card = self.board["threads"][0]
+        if self.concurrent_edit:
+            card.update(self.concurrent_edit)
+        args = request["args"]
+        if request.get("api") != 1 or args.get("id") != card["id"]:
+            return self.reply(400, {"error": "bad_request", "detail": "synthetic server"})
+        if request["op"] == "note.add":
+            card["events"].append({"at": 1780000000001, "type": "note", "text": args["text"]})
+        elif request["op"] == "card.update":
+            if any(card.get(k) != v for k, v in args.get("if", {}).items()):
+                return self.reply(409, {"error": "stale", "detail": "fields changed", "card": card})
+            card.update(args["set"])
+        else:
+            return self.reply(400, {"error": "unknown_op", "detail": request["op"]})
+        self.board["rev"] += 1
+        self.reply(200, {"ok": True, "rev": self.board["rev"], "changed": {"cards": [card]},
+                         "duplicate": False})
 
     def log_message(self, *args):
         pass
@@ -92,10 +111,10 @@ class PublicSkillTest(unittest.TestCase):
                                "--dest", str(destination)], check=check, capture_output=True, text=True)
 
     def setUp(self):
-        Handler.board = {"version": 2, "savedAt": 123, "inbox": [], "threads": [
+        Handler.board = {"version": 2, "rev": 7, "savedAt": 123, "inbox": [], "threads": [
             {"id": "synthetic-card", "title": "Synthetic task", "state": "ready", "priority": 1,
              "lane": "errand", "createdAt": 1780000000000, "touchedAt": 1780000000000, "events": []}]}
-        Handler.reject_write = False
+        Handler.concurrent_edit = None
         self.config = self.root / "client.json"
         self.config.write_text(json.dumps({"url": self.url, "token": "synthetic-test-token",
                                           "ca_file": str(self.root / "ca.crt")}))
@@ -117,13 +136,14 @@ class PublicSkillTest(unittest.TestCase):
         self.assertFalse((self.installed / "should-not-exist").exists())
         self.assertFalse((self.installed / "board.json").exists())
 
-    def test_cas_conflict_does_not_overwrite_server(self):
-        Handler.reject_write = True
-        before = copy.deepcopy(Handler.board)
-        result = self.cli("note", "synthetic-card", "Must not save")
+    def test_stale_field_is_not_overwritten(self):
+        Handler.concurrent_edit = {"title": "Renamed elsewhere"}
+        expected = copy.deepcopy(Handler.board)
+        expected["threads"][0]["title"] = "Renamed elsewhere"
+        result = self.cli("set", "synthetic-card", "title=Renamed here")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("409", result.stderr)
-        self.assertEqual(Handler.board, before)
+        self.assertIn("刚被别处改过", result.stderr)
+        self.assertEqual(Handler.board, expected)
 
     def test_invalid_trust_hostname_and_public_http_are_rejected(self):
         config = json.loads(self.config.read_text())

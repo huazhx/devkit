@@ -1,8 +1,8 @@
-"""board.json 的数据规则（v2，2026-09-23）—— Python 侧唯一的一份。
+"""看板的数据规则（v2，2026-09-23）—— 唯一的一份。
 
-boardctl.py、board-server.py、board-merge.py 都从这里取：迁移、空字段规整、事件的追加与推导。
-页面那一侧在 js/rank.js 的「事件账本」一节有一份等价实现；两边对同一份 v1 数据的迁移结果
-必须逐字节相同（改这里就同步改那边，并跑 `python3 board_schema.py --selftest`）。
+board_ops.py、board_store.py、boardctl.py 都从这里取：迁移、空字段规整、事件的追加与推导。
+页面不再有自己的一份（2026-10-21 起）：它只发操作，推导值由服务端放进卡片视图的 `derived`。
+改这里后跑 `python3 board_schema.py --selftest`。
 
 v2 的形状（字段说明在 BOARD.md §1）：
   卡上只放**当前值**：state / breakpoint / nextAction / …
@@ -25,7 +25,7 @@ import json
 import sys
 
 VERSION = 2
-CAP_MS = 6 * 3600 * 1000   # 一次 RUNNING 的上限；与 js/rank.js 的 SESSION_CAP_MS 一致
+CAP_MS = 6 * 3600 * 1000   # 一次 RUNNING 的上限（服务端兜底切出用）
 
 # 空值不落盘的字段。读的一方一律按「缺 = 空」处理。
 OPTIONAL = ("due", "deliverable", "breakpoint", "nextAction", "waitingOn",
@@ -157,6 +157,32 @@ def done_at(c):
     return e["ts"] if e else None
 
 
+def trashed_at(c):
+    if c.get("state") != "trashed":
+        return None
+    e = last_state(c, "trashed")
+    return e["ts"] if e else None
+
+
+STATES = ("ready", "running", "blocked", "done", "trashed")
+
+
+def restore_state(c):
+    """从垃圾桶恢复时回到哪个状态：进桶前最后一个非 trashed 的状态。
+
+    进桶前是 running 的恢复成 ready（避免出现第二张 running）；从没记过状态事件的卡默认 ready。
+    最后一条 state 事件就是进桶那条，所以从倒数第二条往前找（与改造前 rank.js restoreState 同口径）。"""
+    ev = [e for e in events(c) if e.get("kind") == "state"]
+    for e in reversed(ev[:-1]):
+        to = e.get("to")
+        if to == "trashed":
+            continue
+        if to == "running":
+            return "ready"
+        return to if to in STATES else "ready"
+    return "ready"
+
+
 def sessions(c):
     """全部已结束的会话 [{ts, out, capped, noticedAt?}]，按 ts 升序。
     旧式 session 条目原样读；新的从 state 事件配对：进 running 到下一次离开。"""
@@ -182,6 +208,21 @@ def sessions(c):
     return out
 
 
+def derived(c):
+    """卡片视图里的 derived：全部从 events 推出，不落库，客户端也不回传（docs/OPS.md §2）。
+
+    页面不再自带一份推导规则——改推导只改这里，页面和 CLI 读到的是同一个数。"""
+    return {
+        "breakpointAt": breakpoint_at(c),
+        "nextActionAt": next_action_at(c),
+        "enteredAt": entered_at(c),
+        "doneAt": done_at(c),
+        "trashedAt": trashed_at(c),
+        "restoreTo": restore_state(c),
+        "sessions": sessions(c),
+    }
+
+
 # ---------------------------------------------------------------- 写
 
 def log_event(c, e):
@@ -189,11 +230,14 @@ def log_event(c, e):
     return e
 
 
-def set_text(c, field, value, ts):
-    """改 breakpoint / nextAction：值真的变了才写，并记一条新值事件。返回是否变了。"""
+def set_text(c, field, value, ts, reaffirm=False):
+    """改 breakpoint / nextAction：值真的变了才写，并记一条新值事件。返回是否变了。
+
+    reaffirm：切换时原样留下的非空断点也记一条——走过一遍切换仪式就是重新确认了它，
+    「断点凉了」从这一刻重新计时（与 rank.js setText 的 reaffirm 同义）。"""
     kind = {"breakpoint": "bp", "nextAction": "na"}[field]
     value = value or ""
-    if value == (c.get(field) or ""):
+    if value == (c.get(field) or "") and not (reaffirm and value):
         return False
     c[field] = value
     log_event(c, {"ts": ts, "kind": kind, "text": value})
@@ -258,6 +302,21 @@ def _selftest():
     check("doneAt 推导", done_at(d) == 50)
     set_state(d, "ready", 60)
     check("撤回后 doneAt 为空", done_at(d) is None)
+    check("reaffirm：原样留下的非空值也记一条", set_text(c, "breakpoint", "b3", 4000, reaffirm=True)
+          and breakpoint_at(c) == 4000)
+    check("reaffirm 不为空值记事件", not set_text({"breakpoint": ""}, "breakpoint", "", 4000, reaffirm=True))
+    t = {"id": "t", "state": "ready", "events": []}
+    set_state(t, "blocked", 10)
+    set_state(t, "trashed", 20)
+    check("恢复到进桶前的状态", restore_state(t) == "blocked" and trashed_at(t) == 20)
+    r = {"id": "r", "state": "ready", "events": []}
+    set_state(r, "running", 10)
+    set_state(r, "trashed", 20)
+    check("进桶前是 running 的恢复成 ready", restore_state(r) == "ready")
+    check("没有状态记录默认 ready", restore_state({"state": "trashed", "events": []}) == "ready")
+    dv = derived(c)
+    check("derived 字段齐全", set(dv) == {"breakpointAt", "nextActionAt", "enteredAt", "doneAt",
+                                         "trashedAt", "restoreTo", "sessions"})
     print("自检通过" if ok else "自检失败")
     return ok
 
