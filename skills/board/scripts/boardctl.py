@@ -27,6 +27,7 @@
 """
 
 import argparse
+import atexit
 import json
 import os
 import ipaddress
@@ -40,6 +41,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 
 import board_schema as S   # 迁移 / 事件账本 / 推导：规则只有那一份
+import board_package as P  # 安装包版本与自动更新（ARCHITECTURE §6）
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CLIENT_CONFIG = os.path.expanduser(os.environ.get(
@@ -94,8 +96,66 @@ def request(path, data=None, method="GET", headers=None):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
     opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), NoRedirect())
-    with opener.open(req, timeout=10) as response:
-        return json.load(response)
+    try:
+        with opener.open(req, timeout=10) as response:
+            _note_server_client(response.headers.get("X-Board-Client"))
+            return json.load(response)
+    except urllib.error.HTTPError as e:
+        _note_server_client(e.headers.get("X-Board-Client"))
+        raise
+
+
+# ---- 自动更新（ARCHITECTURE §6）----
+# 服务端在每个 API 响应头里带上它打包的客户端版本。和本机受管安装不一致时，命令结束后从同一个服务
+# 取 GET /api/client，校验后原子替换本机所有受管安装。连接配置在安装目录外，不受影响。
+SKILL_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+_server_client = None
+_update_tried = False
+
+
+def _note_server_client(version):
+    global _server_client
+    if version and not _server_client:
+        _server_client = version
+
+
+def auto_update_enabled():
+    """默认只对真实配置的服务开启：测试和临时实例都会用环境变量改地址或凭据，不能拿它们的包覆盖本机安装。"""
+    flag = os.environ.get("BOARD_AUTO_UPDATE")
+    if flag is not None:
+        return flag == "1"
+    if _client_config.get("auto_update") is False:
+        return False
+    return not any(os.environ.get(k) for k in (
+        "BOARD_URL", "BOARD_CLIENT_CONFIG", "BOARD_CA_FILE", "BOARD_API_TOKEN", "BOARD_CREDENTIALS_FILE"))
+
+
+def maybe_update():
+    """有需要就更新，返回是否换过。失败只提示一行，不影响这次命令的结果。"""
+    global _update_tried
+    if _update_tried or not _server_client or not auto_update_enabled():
+        return False
+    _update_tried = True
+    try:
+        stale = [r for r in P.install_roots(SKILL_ROOT) if P.version_of(P.files_of(r)) != _server_client]
+        if not stale:
+            return False
+        files = P.check(request("/api/client"), expected=_server_client)
+        for root in stale:
+            P.install(files, root)
+    except Exception as e:
+        print(f"boardctl: 客户端自动更新没有完成（{e}）；这次命令不受影响。"
+              "手动更新见 references/SETUP.md。", file=sys.stderr)
+        return False
+    print(f"boardctl: 已按服务端更新本机看板客户端（{len(stale)} 处，版本 {_server_client}）。", file=sys.stderr)
+    return True
+
+
+def _version_mismatch(e):
+    """这次被拒是因为客户端和服务端对不上接口（而不是数据或权限问题）。"""
+    err = _error_body(e).get("error")
+    return (e.code in (405, 410) or (e.code == 404 and err != "not_found")
+            or (e.code == 400 and err == "api_version"))
 
 # `set` 允许写的字段。id / events / plan / createdAt 等走各自的命令或不允许改。
 SETTABLE = {
@@ -155,16 +215,20 @@ API_VERSION = 1   # docs/OPS.md 的接口版本；服务端不认识时回 400
 
 
 def _error_body(e):
-    try:
-        return json.loads(e.read().decode("utf-8") or "{}")
-    except Exception:
-        return {}
+    if not hasattr(e, "board_body"):    # 响应体只能读一次；判断和报错都要用
+        try:
+            e.board_body = json.loads(e.read().decode("utf-8") or "{}")
+        except Exception:
+            e.board_body = {}
+    return e.board_body
 
 
 def _op_failure(e):
     """把服务端的拒绝翻译成「发生了什么、下一步该怎么做」。所有分支都意味着这次什么都没写。"""
     body = _error_body(e)
     err, detail = body.get("error"), body.get("detail") or ""
+    if e.code == 400 and err == "api_version":
+        return f"服务端与客户端版本不匹配（{detail}）；未写入。更新 CLI 后再试。"
     if e.code == 400:
         return f"服务端拒绝了这个操作（参数不合法，未写入）：{detail or err}"
     if e.code == 401:
@@ -199,6 +263,12 @@ def op(name, args):
         try:
             return request("/api/ops", data=body, method="POST", headers=headers)
         except urllib.error.HTTPError as e:
+            # 接口对不上：客户端按服务端更新后，用新版把这条命令重新执行一次（被拒的这次什么都没写）
+            if _version_mismatch(e) and not os.environ.get("BOARD_CLIENT_REEXEC") and maybe_update():
+                print("boardctl: 用新版客户端重新执行这条命令。", file=sys.stderr, flush=True)
+                sys.stdout.flush()
+                os.environ["BOARD_CLIENT_REEXEC"] = "1"
+                os.execv(sys.executable, [sys.executable, *sys.argv])
             die(_op_failure(e))
         except ValueError as e:      # 配置错误（如公网 HTTP）：重试没有意义
             die(f"写入服务失败（{e}）；没有改写任何本地文件。")
@@ -634,6 +704,7 @@ def main():
     a = p.parse_args()
     if getattr(a, "open_", False):
         a.decide = None
+    atexit.register(maybe_update)   # 命令（含 die 退出）结束后再更新：不改正在运行的这一次
     a.fn(a)
 
 

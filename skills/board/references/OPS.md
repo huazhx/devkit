@@ -51,7 +51,8 @@
 | 状态 | 体 | 含义 |
 |---|---|---|
 | 200 | `{"ok": true, "rev": N, "opSeq": S, "changed": {…}, "result": {…}, "duplicate": bool}` | 已执行（或这个 `opId` 以前已执行过，`duplicate: true`，不重复执行） |
-| 400 | `{"error": "bad_request", "detail": "…"}` | 未知操作、参数缺失或不合法、`api` 版本不认识 |
+| 400 | `{"error": "bad_request", "detail": "…"}` | 未知操作、参数缺失或不合法 |
+| 400 | `{"error": "api_version", "detail": "…"}` | `api` 版本不认识（客户端和服务端对不上，CLI 会先自动更新再重跑，见 ARCHITECTURE §6） |
 | 404 | `{"error": "not_found", "detail": "…"}` | 点名的卡或收件箱条目不存在 |
 | 409 | `{"error": "stale", "detail": "…", "card": <卡片视图>}` | `if` 里的字段已被别处改过；什么都没写 |
 | 409 | `{"error": "op_id_reused", "detail": "…"}` | 同一个 `opId` 配了不同的操作或参数 |
@@ -95,6 +96,8 @@
 服务内部操作（不经 HTTP，`actor`="server"）：`board.sweep` —— RUNNING 超过 6 小时自动切回 ready，规则同改造前的 `sweep()`。
 
 ## 5. 客户端约定
+
+- 用 API 令牌认证的响应都带 `X-Board-Client: <版本>`，即服务端随镜像发布的客户端安装包的内容哈希。`GET /api/client`（需认证）返回 `{"version": "…", "files": {"相对路径": "文本内容", …}}`。这两处是旧客户端找到新版本的唯一通道，只许加字段，不许改坏（ARCHITECTURE §6）。
 
 - 每次操作生成新的 `opId`。网络错误时用**同一个** `opId` 重试一次；服务端按 `opId` 去重，所以重试不会让一条备注记两次。
 - 网页不做乐观更新、不存本地数据副本：发操作 → 等响应 → 按 `changed` 改内存里的视图 → 重画。收到别人的 SSE 改动就重新 `GET /board.json`。服务器连不上时页面只读，并提示这次操作没有保存。
