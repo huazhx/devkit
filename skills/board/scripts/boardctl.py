@@ -16,6 +16,7 @@
   boardctl.py note 示例项目 "完成合成数据验证"
   boardctl.py set 示例项目 due=2027-01-15 priority=0
   boardctl.py step 示例项目 验证 2       # 勾选第 2 格（--undone 取消）
+  boardctl.py plan 示例项目 --set plan.json  # 整份替换 plan（格子名 ≤ 30 字，说明放 detail）
   boardctl.py q 示例项目 1 --decide "采用方案 A" --user-verbatim
   boardctl.py time --days 7             # 时间去哪了（与页面「⏱ 时间」视图同口径）
   boardctl.py inbox "一条还没归卡的想法"   # 记到收件箱（页面上可归入线程 / 升成卡 / 删除）
@@ -362,6 +363,17 @@ def cmd_show(a):
 def cmd_plan(a):
     card = resolve(load(), a.ref)
     plan = card.get("plan")
+    if a.set:
+        # 整份换掉这张卡的 plan（一个 card.update，带 if：读完之后别处改过 plan 就拒绝，不覆盖）
+        try:
+            src = sys.stdin.read() if a.set == "-" else open(a.set, encoding="utf-8").read()
+            new = json.loads(src)
+        except (OSError, ValueError) as e:
+            die(f"读不了 plan 文件（{e}）")
+        new = {"tracks": new.get("tracks")} if isinstance(new, dict) else new
+        result = op("card.update", {"id": card["id"], "set": {"plan": new}, "if": {"plan": plan}})
+        print(f"已更新「{card['title']}」的 plan。{written(result)}")
+        return
     if not plan:
         print(f"「{card['title']}」没有 plan 字段")
         return
@@ -371,6 +383,8 @@ def cmd_plan(a):
             print(f"flow  {tr['name']}   {done}/{len(tr['steps'])}")
             for i, s in enumerate(tr["steps"], 1):
                 print(f"        {i}. [{'x' if s.get('done') else ' '}] {s['t']}")
+                if s.get("detail"):
+                    print(f"             {s['detail']}")
         else:
             print(f"q     {tr['name']}   [{tr.get('status')}]"
                   + (f"\n        → {tr['answer']}" if tr.get("answer") else ""))
@@ -643,8 +657,9 @@ def main():
     group.add_argument("--events", type=int, help="只显示最近 N 条事件")
     s.set_defaults(fn=cmd_show)
 
-    s = sub.add_parser("plan", help="只看 plan 的轨道与格子")
+    s = sub.add_parser("plan", help="看 plan 的轨道与格子；--set FILE 整份替换（- 读标准输入）")
     s.add_argument("ref")
+    s.add_argument("--set", metavar="FILE", help="新 plan 的 JSON（{\"tracks\": [...]}），格子名 ≤ 30 字，说明放 detail")
     s.set_defaults(fn=cmd_plan)
 
     s = sub.add_parser("time", help="时间去哪了（与页面「⏱ 时间」同口径）")
