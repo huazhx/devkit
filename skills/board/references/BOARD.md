@@ -43,7 +43,7 @@ Card fields:
 | `deliverable` | Deliverable | A one-sentence acceptance criterion; must not be written as steps. |
 | `breakpoint` | Breakpoint | The current state that only the user knows and that decays over time; every rewrite appends a `bp` event. |
 | `nextAction` | Next action | An action that can be carried out directly; if it is a decision, write it as "Decide: A or B, by criterion C". Every rewrite appends an `na` event. |
-| `waitingOn` | Whom I am waiting on | When the AI sets `blocked`, it must hold content the user provided; empty in other states. For the exception when the user shelves a card on the page themselves, see §3.2. |
+| `waitingOn` | Whom I am waiting on | When the AI sets `blocked`, it must hold content the user provided; empty in other states. For the exception when the user blocks a card on the page themselves, see §3.2. |
 | `blockingOthers` | Who is waiting on me | A person's name or one sentence. The opposite direction to `waitingOn`; when non-empty, it adds 4 to urgency. |
 | `lane` | Task type | `project` / `standing` / `errand`; determines the required information and how the card is queued. |
 | `cadence` | Expected interval, in days, for a standing task | Integer number of days, used only by `standing`; empty for other types. |
@@ -138,7 +138,7 @@ Record only information the user has already given. You may rewrite the user's d
 - A card whose breakpoint was written 7 or more days ago must be re-entered (Re-enter); it must not resume by following the old next action. Before starting, ask the user to rewrite `nextAction`; the AI must not write it for them. Do not force this procedure on errands, which need no breakpoint.
 - Before the AI sets `blocked`, it must know whom or what the user is waiting on; if the user has not said, ask. When unblocking, clear any `waitingOn` that no longer applies.
 - To deliver, use `python3 boardctl.py set <card> state=done`; the command appends a state event. Delivered cards stay in the service data and are not moved anywhere.
-- On the page, the user can deliver (Deliver) or shelve (Shelve) a ready card directly. Shelving allows an empty `waitingOn`, and the page marks it as not filled in; this exception does not allow the AI to guess what the card is waiting on.
+- On the page, the user can deliver (Deliver) or block (Block) a ready card directly. Blocking from the page allows an empty `waitingOn`, and the page marks it as not filled in; this exception does not allow the AI to guess what the card is waiting on.
 - An ordinary delete on the page (Move to trash) puts the card in `trashed`; it can be restored and asks for no second confirmation. Delete forever inside the Trash is irreversible and requires confirmation. The AI must not permanently delete a card on its own; it must first get the user's explicit authorization.
 - A state change must append a `{ts, kind: "state", to}` event and refresh `touchedAt`; when a card leaves `running`, `lastActiveId` is updated at the same time. Do it through the CLI or the page; never change only the current `state` and leave out the history.
 
