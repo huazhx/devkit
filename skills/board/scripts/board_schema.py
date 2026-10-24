@@ -1,39 +1,43 @@
-"""看板的数据规则（v2，2026-09-23）—— 唯一的一份。
+"""The board's data rules (v2, 2026-09-23): the one and only copy.
 
-board_ops.py、board_store.py、boardctl.py 都从这里取：迁移、空字段规整、事件的追加与推导。
-页面不再有自己的一份（2026-10-21 起）：它只发操作，推导值由服务端放进卡片视图的 `derived`。
-改这里后跑 `python3 board_schema.py --selftest`。
+board_ops.py, board_store.py and boardctl.py all take them from here: migration, normalizing empty
+fields, appending events and deriving values from them.
+The page no longer has its own copy (since 2026-10-21): it only sends operations, and the server
+puts the derived values into the card view's `derived`.
+After changing this file, run `python3 board_schema.py --selftest`.
 
-v2 的形状（字段说明在 BOARD.md §1）：
-  卡上只放**当前值**：state / breakpoint / nextAction / …
-  变化记进只增账本 events[]，每条写的是**新值**：
+The v2 shape (fields are described in BOARD.md §1):
+  The card holds only **current values**: state / breakpoint / nextAction / …
+  Changes go into the append-only ledger events[]; each entry records the **new value**:
     {ts, kind: "note",  text}
-    {ts, kind: "bp",    text}                 断点被设成 text（"" = 清空）
-    {ts, kind: "na",    text}                 下一步被设成 text
-    {ts, kind: "state", to, auto?, noticedAt?}  状态变成 to；auto = 服务端 6 小时兜底切出
-  只由迁移产生、以后不再写的两种旧式条目：
-    {ts, kind: "bp"|"na", text, replaced: true}  v1 history：text 这个旧值在 ts 被换掉
-    {ts, kind: "session", out, noticedAt?}        v1 sessions：一次 RUNNING 的起止
-  推导（不再落字段）：breakpointAt / nextActionAt = 该类最近一条（含 replaced）的 ts；
-  enteredAt / doneAt = 当前状态对应的最后一条 state 事件；会话列表见 sessions()。
+    {ts, kind: "bp",    text}                 the breakpoint was set to text ("" = cleared)
+    {ts, kind: "na",    text}                 the next action was set to text
+    {ts, kind: "state", to, auto?, noticedAt?}  the state became to; auto = the server's 6-hour fallback auto-pause
+  Two legacy entry kinds that only the migration produces and that are never written again:
+    {ts, kind: "bp"|"na", text, replaced: true}  v1 history: the old value text was replaced at ts
+    {ts, kind: "session", out, noticedAt?}        v1 sessions: the start and end of one RUNNING period
+  Derived (no longer stored as fields): breakpointAt / nextActionAt = ts of the latest entry of that
+  kind (replaced ones included); enteredAt / doneAt = the last state event for the current state;
+  for the session list see sessions().
 
-为什么这样拆：v1 的四个时间戳要靠每个写入点自觉「值真的变了才打戳」，漏一处就是一个
-静默的错数（ARCHITECTURE 不变量 3）；状态切换根本没记，撤回过几次、在 BLOCKED 等了多久，
-发生一次丢一次。
+Why it is split this way: v1's four timestamps relied on every write site remembering to "stamp
+only when the value really changed", and each missed site was a silent wrong number (ARCHITECTURE
+invariant 3); state changes were not recorded at all, so how many times a card was reopened, or
+how long it waited in BLOCKED, was lost every time it happened.
 """
 import json
 import sys
 
 VERSION = 2
-CAP_MS = 6 * 3600 * 1000   # 一次 RUNNING 的上限（服务端兜底切出用）
+CAP_MS = 6 * 3600 * 1000   # cap on one RUNNING period (used by the server's fallback auto-pause)
 
-# 空值不落盘的字段。读的一方一律按「缺 = 空」处理。
+# Fields whose empty values are not stored. Readers always treat "missing" as "empty".
 OPTIONAL = ("due", "deliverable", "breakpoint", "nextAction", "waitingOn",
             "blockingOthers", "cadence", "log")
-# v1 独有、迁移后删掉的字段
+# Fields only v1 had; the migration deletes them
 V1_ONLY = ("notes", "history", "sessions", "breakpointAt", "nextActionAt",
            "enteredAt", "doneAt", "archivedUpTo", "roadmap")
-# 合并时判断「同一条事件」的签名
+# Signature that decides "the same event" when merging
 EVENT_SIG = ("ts", "kind", "text", "to", "out", "replaced")
 
 
@@ -42,14 +46,14 @@ def _num(v):
 
 
 def valid_start(v, now):
-    """一次可信的会话起点：数值、量级像毫秒、不在未来（与 rank.js 的 isSessionStart 同口径）。"""
+    """A trustworthy session start: a number, of millisecond magnitude, not in the future (same rule as isSessionStart in rank.js)."""
     return _num(v) and 1e12 <= v <= now + 60000
 
 
-# ---------------------------------------------------------------- 规整 / 迁移
+# ---------------------------------------------------------------- normalization / migration
 
 def compact_card(c):
-    """空值字段不落盘。原地修改并返回。"""
+    """Empty fields are not stored. Modifies in place and returns the card."""
     for k in OPTIONAL:
         if k in c and c[k] in ("", None):
             del c[k]
@@ -57,7 +61,7 @@ def compact_card(c):
 
 
 def migrate_card(c):
-    """v1 卡 → v2 卡。只读 c，返回新对象；已是 v2 的卡（有 events、没有 v1 字段）原样规整。"""
+    """v1 card → v2 card. Only reads c and returns a new object; a card already in v2 (has events, no v1 fields) is just normalized."""
     c = dict(c)
     ev = list(c.get("events") or [])
     for n in c.get("notes") or []:
@@ -66,15 +70,16 @@ def migrate_card(c):
     hist = [h for h in (c.get("history") or []) if isinstance(h, dict) and _num(h.get("ts"))]
     for h in hist:
         ev.append({"ts": h["ts"], "kind": h.get("kind"), "text": h.get("text", ""), "replaced": True})
-    # 当前值那一条：优先用 v1 的戳；没有戳时，最后一次被替换的时刻就是它写入的时刻；
-    # 再没有就退到 v1 读者的同一个兜底（bp → touchedAt，na → createdAt），并标 approx。
+    # The entry for the current value: prefer the v1 stamp; without one, the time of the last
+    # replacement is when it was written; failing that, fall back to what v1 readers used
+    # (bp → touchedAt, na → createdAt) and mark it approx.
     for kind, field, stamp, fallback in (("bp", "breakpoint", "breakpointAt", "touchedAt"),
                                          ("na", "nextAction", "nextActionAt", "createdAt")):
         if "events" in c:
             continue
         prior = [h["ts"] for h in hist if h.get("kind") == kind]
         if _num(c.get(stamp)):
-            # 有戳就照戳记，当前值为空也记（"" = 在这一刻被清空）——否则「上次推进」会丢
+            # With a stamp, record it as stamped, even if the current value is empty ("" = cleared at this moment); otherwise "last progress" would be lost
             ev.append({"ts": c[stamp], "kind": kind, "text": c.get(field) or ""})
         elif not c.get(field):
             continue
@@ -96,20 +101,20 @@ def migrate_card(c):
             ev.append({"ts": c["doneAt"], "kind": "state", "to": "done"})
     for k in V1_ONLY:
         c.pop(k, None)
-    ev.sort(key=lambda e: e["ts"])            # 稳定排序：同一时刻保持写入顺序
+    ev.sort(key=lambda e: e["ts"])            # stable sort: entries at the same moment keep their write order
     c["events"] = ev
     return compact_card(c)
 
 
 def migrate_board(b):
-    """整份板子迁到 v2（幂等）。返回新对象，不改入参。"""
+    """Migrate a whole board to v2 (idempotent). Returns a new object and leaves the argument unchanged."""
     b = dict(b)
     b["threads"] = [migrate_card(t) for t in b.get("threads") or [] if isinstance(t, dict)]
     b["version"] = VERSION
     return b
 
 
-# ---------------------------------------------------------------- 推导
+# ---------------------------------------------------------------- derivations
 
 def events(c):
     ev = c.get("events")
@@ -117,7 +122,7 @@ def events(c):
 
 
 def last_change(c, kind):
-    """bp / na 最近一次改变的那条。v1 的 replaced 条目也算：它的 ts 就是那次改变发生的时刻。"""
+    """The latest change entry for bp / na. v1 replaced entries count too: their ts is when that change happened."""
     for e in reversed(events(c)):
         if e.get("kind") == kind:
             return e
@@ -137,13 +142,13 @@ def breakpoint_at(c):
 
 
 def next_action_at(c):
-    """「上次真正推进」：nextAction 最近一次换值的时刻（standing 卡的 cadence 计时用它）。"""
+    """The "last real progress": when nextAction last changed value (the cadence timer of standing cards uses it)."""
     e = last_change(c, "na")
     return e["ts"] if e else None
 
 
 def entered_at(c):
-    """这次 RUNNING 的起点；不在 running 就是 None，避免使用旧状态遗留的起点。"""
+    """Start of the current RUNNING period; None when not running, so a start left over from an old state is never used."""
     if c.get("state") != "running":
         return None
     e = last_state(c, "running")
@@ -168,10 +173,12 @@ STATES = ("ready", "running", "blocked", "done", "trashed")
 
 
 def restore_state(c):
-    """从垃圾桶恢复时回到哪个状态：进桶前最后一个非 trashed 的状态。
+    """Which state a card returns to when restored from the Trash: the last non-trashed state before it went in.
 
-    进桶前是 running 的恢复成 ready（避免出现第二张 running）；从没记过状态事件的卡默认 ready。
-    最后一条 state 事件就是进桶那条，所以从倒数第二条往前找（与改造前 rank.js restoreState 同口径）。"""
+    A card that was running before going to the Trash is restored as ready (so there is never a second
+    running card); a card with no recorded state event defaults to ready.
+    The last state event is the one that moved it to the Trash, so the search starts from the
+    second-to-last one backwards (same rule as restoreState in rank.js before the rework)."""
     ev = [e for e in events(c) if e.get("kind") == "state"]
     for e in reversed(ev[:-1]):
         to = e.get("to")
@@ -184,8 +191,8 @@ def restore_state(c):
 
 
 def sessions(c):
-    """全部已结束的会话 [{ts, out, capped, noticedAt?}]，按 ts 升序。
-    旧式 session 条目原样读；新的从 state 事件配对：进 running 到下一次离开。"""
+    """All finished sessions [{ts, out, capped, noticedAt?}], by ts ascending.
+    Legacy session entries are read as they are; new ones are paired from state events: entering running to the next exit."""
     out, start = [], None
     for e in events(c):
         k = e.get("kind")
@@ -209,9 +216,9 @@ def sessions(c):
 
 
 def derived(c):
-    """卡片视图里的 derived：全部从 events 推出，不落库，客户端也不回传（docs/OPS.md §2）。
+    """The derived values of the card view: all computed from events, never stored, never sent back by clients (docs/OPS.md §2).
 
-    页面不再自带一份推导规则——改推导只改这里，页面和 CLI 读到的是同一个数。"""
+    The page no longer carries its own derivation rules: a derivation changes only here, and the page and the CLI read the same number."""
     return {
         "breakpointAt": breakpoint_at(c),
         "nextActionAt": next_action_at(c),
@@ -223,7 +230,7 @@ def derived(c):
     }
 
 
-# ---------------------------------------------------------------- 写
+# ---------------------------------------------------------------- writes
 
 def log_event(c, e):
     c.setdefault("events", []).append(e)
@@ -231,10 +238,11 @@ def log_event(c, e):
 
 
 def set_text(c, field, value, ts, reaffirm=False):
-    """改 breakpoint / nextAction：值真的变了才写，并记一条新值事件。返回是否变了。
+    """Change breakpoint / nextAction: write only when the value really changed, and record a new-value event. Returns whether it changed.
 
-    reaffirm：切换时原样留下的非空断点也记一条——走过一遍切换仪式就是重新确认了它，
-    「断点凉了」从这一刻重新计时（与 rank.js setText 的 reaffirm 同义）。"""
+    reaffirm: a non-empty breakpoint left unchanged during a switch is recorded too; going through the
+    switch ritual re-confirms it, and the "stale breakpoint" timer restarts from this moment (same
+    meaning as reaffirm in rank.js setText)."""
     kind = {"breakpoint": "bp", "nextAction": "na"}[field]
     value = value or ""
     if value == (c.get(field) or "") and not (reaffirm and value):
@@ -245,7 +253,7 @@ def set_text(c, field, value, ts, reaffirm=False):
 
 
 def set_state(c, to, ts, auto=False, noticed_at=None):
-    """改 state 并记一条事件；进 done 以外的状态时顺手清 waitingOn 的责任留给调用方。"""
+    """Change state and record an event; clearing waitingOn when entering a state other than done is left to the caller."""
     if c.get("state") == to:
         return False
     c["state"] = to
@@ -266,7 +274,7 @@ def notes(c):
     return [e for e in events(c) if e.get("kind") == "note"]
 
 
-# ---------------------------------------------------------------- 自检
+# ---------------------------------------------------------------- self-test
 
 def _selftest():
     ok = True
@@ -283,48 +291,48 @@ def _selftest():
           "history": [{"ts": 400, "kind": "bp", "text": "b1"}, {"ts": 500, "kind": "na", "text": "n1"}],
           "sessions": [{"ts": 600, "out": 600 + CAP_MS}]}
     c = migrate_card(v1)
-    check("v1 字段全删", not any(k in c for k in V1_ONLY))
-    check("空字段不落盘", not any(k in c for k in ("waitingOn", "due", "cadence")))
-    check("条目数守恒", len(c["events"]) == 1 + 2 + 2 + 1 + 1)
-    check("breakpointAt 取 v1 的戳", breakpoint_at(c) == 800)
-    check("nextActionAt 无戳时取最后一次替换", next_action_at(c) == 500)
-    check("enteredAt 推导", entered_at(c) == 1000)
-    check("旧 session 读出且识别兜底", sessions(c) == [{"ts": 600, "out": 600 + CAP_MS, "capped": True}])
-    check("幂等", migrate_card(c) == c)
-    check("不改入参", "notes" in v1)
+    check("all v1 fields deleted", not any(k in c for k in V1_ONLY))
+    check("empty fields not stored", not any(k in c for k in ("waitingOn", "due", "cadence")))
+    check("entry count conserved", len(c["events"]) == 1 + 2 + 2 + 1 + 1)
+    check("breakpointAt takes the v1 stamp", breakpoint_at(c) == 800)
+    check("nextActionAt without a stamp takes the last replacement", next_action_at(c) == 500)
+    check("enteredAt derived", entered_at(c) == 1000)
+    check("legacy session read and capped one recognized", sessions(c) == [{"ts": 600, "out": 600 + CAP_MS, "capped": True}])
+    check("idempotent", migrate_card(c) == c)
+    check("argument unchanged", "notes" in v1)
     set_state(c, "ready", 2000, auto=True)
-    check("新会话从 state 事件配对", sessions(c)[-1] == {"ts": 1000, "out": 2000, "capped": True})
-    check("离开 running 后 enteredAt 为空", entered_at(c) is None)
-    check("值没变不记", not set_text(c, "breakpoint", "b2", 3000))
+    check("new session paired from state events", sessions(c)[-1] == {"ts": 1000, "out": 2000, "capped": True})
+    check("enteredAt empty after leaving running", entered_at(c) is None)
+    check("unchanged value not recorded", not set_text(c, "breakpoint", "b2", 3000))
     set_text(c, "breakpoint", "b3", 3000)
-    check("改断点记新值", breakpoint_at(c) == 3000 and c["breakpoint"] == "b3")
+    check("changing the breakpoint records the new value", breakpoint_at(c) == 3000 and c["breakpoint"] == "b3")
     d = migrate_card({"id": "d", "state": "done", "doneAt": 50, "createdAt": 10})
-    check("doneAt 推导", done_at(d) == 50)
+    check("doneAt derived", done_at(d) == 50)
     set_state(d, "ready", 60)
-    check("撤回后 doneAt 为空", done_at(d) is None)
-    check("reaffirm：原样留下的非空值也记一条", set_text(c, "breakpoint", "b3", 4000, reaffirm=True)
+    check("doneAt empty after reopening", done_at(d) is None)
+    check("reaffirm: an unchanged non-empty value is recorded too", set_text(c, "breakpoint", "b3", 4000, reaffirm=True)
           and breakpoint_at(c) == 4000)
-    check("reaffirm 不为空值记事件", not set_text({"breakpoint": ""}, "breakpoint", "", 4000, reaffirm=True))
+    check("reaffirm records no event for an empty value", not set_text({"breakpoint": ""}, "breakpoint", "", 4000, reaffirm=True))
     t = {"id": "t", "state": "ready", "events": []}
     set_state(t, "blocked", 10)
     set_state(t, "trashed", 20)
-    check("恢复到进桶前的状态", restore_state(t) == "blocked" and trashed_at(t) == 20)
+    check("restored to the state before the Trash", restore_state(t) == "blocked" and trashed_at(t) == 20)
     r = {"id": "r", "state": "ready", "events": []}
     set_state(r, "running", 10)
     set_state(r, "trashed", 20)
-    check("进桶前是 running 的恢复成 ready", restore_state(r) == "ready")
-    check("没有状态记录默认 ready", restore_state({"state": "trashed", "events": []}) == "ready")
+    check("running before the Trash is restored as ready", restore_state(r) == "ready")
+    check("no state record defaults to ready", restore_state({"state": "trashed", "events": []}) == "ready")
     dv = derived(c)
-    check("derived 字段齐全", set(dv) == {"breakpointAt", "nextActionAt", "enteredAt", "doneAt",
+    check("derived has every field", set(dv) == {"breakpointAt", "nextActionAt", "enteredAt", "doneAt",
                                          "trashedAt", "restoreTo", "sessions"})
-    print("自检通过" if ok else "自检失败")
+    print("self-test passed" if ok else "self-test FAILED")
     return ok
 
 
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         sys.exit(0 if _selftest() else 1)
-    if "--migrate" in sys.argv:           # 读 stdin 的 v1，写 stdout 的 v2（给迁移校验用）
+    if "--migrate" in sys.argv:           # read v1 from stdin, write v2 to stdout (for migration checks)
         json.dump(migrate_board(json.load(sys.stdin)), sys.stdout, ensure_ascii=False, indent=2)
         sys.exit(0)
     print(__doc__)

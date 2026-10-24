@@ -1,278 +1,278 @@
-# 单核调度台 — Board Operating Protocol
+# Single-Core Board — Board Operating Protocol
 
-本文件是 AI 操作看板的完整手册。日常操作先读 board skill；涉及字段、计划、复杂状态切换、删除或维护时，按需读取对应章节。只执行这里列出的操作；不能确认的用户意图应向用户核实，不得猜测。
+This file is the complete manual for AI agents operating the board. For everyday operations, read the board skill first; when a task involves fields, plans, complex state changes, deletion or maintenance, read the relevant section as needed. Perform only the operations listed here; when you cannot confirm what the user intends, check with the user. Do not guess.
 
-## 0. 服务与数据边界
+## 0. Service and data boundaries
 
-看板由独立的 Linux 服务运行，systemd 负责开机启动和异常重启。网页是任务数据的视图；浏览器和 `boardctl.py` 都通过已认证的 API 读写同一个服务。写入一律是服务端定义的**标准操作**（接口规格见 [OPS.md](OPS.md)）：每个操作只改它点名的卡、字段或收件箱条目，不上传整份看板。
+The board runs as a standalone Linux service; systemd starts it at boot and restarts it after a crash. The web page is a view of the task data; the browser and `boardctl.py` both read from and write to the same service through the authenticated API. Every write is a **standard operation** defined by the server (API contract: [OPS.md](OPS.md)): each operation changes only the card, fields or inbox entry it names, and never uploads the whole board.
 
-**服务数据目录中的 `board.sqlite` 是唯一可写的任务数据源。** 标准路径是 `/var/lib/single-core-board/board.sqlite`，可由 `BOARD_DATA_DIR` 配置。`GET /board.json` 和备份导出的 `board.json` 是它的只读视图，不是第二份数据。代码仓库只放代码，真实卡片、凭据和备份都保存在仓库外。独立的 GitHub 私有数据仓库可保存恢复快照，但不参与日常任务同步，也不自动拉回覆盖生产数据。凭据和私钥不进数据仓库。
+**`board.sqlite` in the service data directory is the only writable source of task data.** The standard path is `/var/lib/single-core-board/board.sqlite`; it can be configured with `BOARD_DATA_DIR`. `GET /board.json` and the `board.json` exported by backups are read-only views of it, not a second copy of the data. The code repository holds only code; real cards, credentials and backups are all kept outside it. A separate private GitHub data repository may hold recovery snapshots, but it takes no part in day-to-day task synchronization and is never pulled back automatically to overwrite production data. Credentials and private keys do not go into the data repository.
 
-**服务不可达或认证失败时，停止操作并说明失败。不得读取旧快照冒充当前状态，不得退回写本地 JSON。** 无论 CLI 在服务主机还是另一台机器上运行，都遵守同一条规则。
+**If the service is unreachable or authentication fails, stop and report the failure. Do not read an old snapshot and present it as the current state, and do not fall back to writing local JSON.** The same rule applies whether the CLI runs on the service host or on another machine.
 
-CLI 连接信息见 [连接配置](SETUP.md)：配置文件默认为 `~/.config/single-core-board/client.json`，也支持 `BOARD_URL`、`BOARD_API_TOKEN` 和 `BOARD_CREDENTIALS_FILE`。浏览器使用登录会话，CLI 使用 API 令牌。不要在卡片、输出或代码仓库中记录凭据。
+CLI connection settings are described in [connection setup](SETUP.md): the configuration file defaults to `~/.config/single-core-board/client.json`; `BOARD_URL`, `BOARD_API_TOKEN` and `BOARD_CREDENTIALS_FILE` are also supported. The browser uses a login session; the CLI uses an API token. Do not record credentials in cards, in output or in the code repository.
 
-看板只包含服务已有的卡片。系统不会从 Research Log 或笔记库自动收集任务。Research Log 是一条长期研究线的记录，由卡片的 `log` 字段链接；任务先建卡，再关联记录。
+The board contains only the cards the service already holds. The system does not collect tasks automatically from a Research Log or a notes vault. A Research Log is the record of one long-running research thread and is linked from a card's `log` field; a task gets a card first, and the log is linked to it afterwards.
 
-服务端代码与部署由其管理员维护。本手册规定如何操作卡片；部署、连接及备份命令见 [连接配置](SETUP.md)。
+The service code and its deployment are maintained by its administrator. This manual specifies how to operate on cards; deployment, connection and backup commands are in [connection setup](SETUP.md).
 
-**部署新服务不等于完成数据接管。** 从旧看板迁移时，必须先确认所有仍会写入的来源及未同步修改，保存完整快照并核对后，再切换写入入口。在接管完成前，不得把空实例或某一台机器上的副本宣布为现有看板的最新状态。
+**Deploying a new service does not mean the data takeover is complete.** When migrating from an old board, first identify every source that may still write and every unsynchronized change, save a complete snapshot and verify it, and only then switch the write entry point. Until the takeover is complete, do not declare an empty instance, or a copy on any one machine, to be the latest state of the existing board.
 
-## 1. 数据结构
+## 1. Data structure
 
-顶层结构：
+Top-level structure:
 
 ```json
 { "version": 2, "rev": 0, "savedAt": 0, "lastActiveId": "…", "threads": [], "inbox": [] }
 ```
 
-- `threads` 是卡片数组。数组顺序没有排队含义，页面自行排序。
-- `inbox` 是 `{ "id": uuid, "ts": epoch-ms, "text": "..." }` 对象数组。页面按 `id` 移动、提升和删除条目；不能写成字符串数组。
-- `rev` 是全局修订号，每个改动数据的操作加一；每张卡另有自己的 `rev`。`savedAt` 是最近一次改动的 Unix 毫秒时间戳。两者都只供核对，不是写入令牌，写入时不需要回传。
-- `lastActiveId` 是最近一张**离开** `running` 的卡的 ID。卡片离开 `running` 时更新它；它只影响同一紧急度区间内的上下文排序。缺失或指向已删除卡片时忽略。
+- `threads` is the array of cards. Array order carries no queueing meaning; the page does its own sorting.
+- `inbox` is an array of `{ "id": uuid, "ts": epoch-ms, "text": "..." }` objects. The page moves, promotes and deletes entries by `id`; it must not be written as an array of strings.
+- `rev` is the global revision number; every operation that changes data increments it by one. Each card also has its own `rev`. `savedAt` is the Unix millisecond timestamp of the most recent change. Both are for checking only; they are not write tokens and need not be sent back when writing.
+- `lastActiveId` is the ID of the card that most recently **left** `running`. It is updated whenever a card leaves `running`; it only affects context ordering within one urgency band. If it is missing or points to a deleted card, ignore it.
 
-卡片字段：
+Card fields:
 
-| 字段 | 含义 | 取值与约束 |
+| Field | Meaning | Values and constraints |
 |---|---|---|
-| `id` | 卡片唯一标识 | 随机字符串，创建后不改变。 |
-| `title` | 任务名称 | 简短名词短语。 |
-| `state` | 状态 | `ready` / `running` / `blocked` / `done` / `trashed`。CLI 默认不列垃圾桶卡，`list --state trashed` 才列。 |
-| `priority` | 优先级 | `0` 最高，其次 `1`、`2`。 |
-| `due` | 截止日 | `YYYY-MM-DD`，空值可缺省。 |
-| `deliverable` | 交付物 | 一句话验收标准，不能写成步骤。 |
-| `breakpoint` | 断点 | 只有用户知道、且会随时间衰减的当前状态；每次改写都追加 `bp` 事件。 |
-| `nextAction` | 下一步 | 可直接执行的动作；若为决策，写成「决定：A 还是 B，判据是 C」。每次改写追加 `na` 事件。 |
-| `waitingOn` | 我在等谁 | AI 设 `blocked` 时必须有用户提供的内容，其他状态为空。用户自己在页面挂起卡片的例外见 §3.2。 |
-| `blockingOthers` | 谁在等我 | 人名或一句话。方向与 `waitingOn` 相反；非空时紧急度加 4。 |
-| `lane` | 任务类型 | `project` / `standing` / `errand`，决定必填信息和排队方式。 |
-| `cadence` | 常驻任务的期望间隔天数 | 仅 `standing` 使用整数天数；其他类型为空。 |
-| `log` | Research Log 链接 | 如 `[[研究记录]]`，多个链接以 ` · ` 连接。关联笔记库不是运行看板的前提。 |
-| `plan` | 进度摘要，即这条线的全局位置 | `{ "summaryAt": epoch-ms, "tracks": [...] }`；没有摘要时不设此字段。轨道格式见 §3.6。 |
-| `createdAt` / `touchedAt` | 创建 / 最近活动时间 | Unix 毫秒。每次编辑卡片都刷新 `touchedAt`。 |
-| `events` | 记录、字段改写与状态切换的账本 | 按 `ts` 升序，只增不改，无上限，永不截断。仅用户在页面删除自己记录的操作例外。 |
+| `id` | Unique card identifier | Random string; never changes after creation. |
+| `title` | Task name | A short noun phrase. |
+| `state` | State | `ready` / `running` / `blocked` / `done` / `trashed`. By default the CLI does not list cards in the Trash; only `list --state trashed` lists them. |
+| `priority` | Priority | `0` is highest, then `1`, `2`. |
+| `due` | Due date | `YYYY-MM-DD`; may be omitted when empty. |
+| `deliverable` | Deliverable | A one-sentence acceptance criterion; must not be written as steps. |
+| `breakpoint` | Breakpoint | The current state that only the user knows and that decays over time; every rewrite appends a `bp` event. |
+| `nextAction` | Next action | An action that can be carried out directly; if it is a decision, write it as "Decide: A or B, by criterion C". Every rewrite appends an `na` event. |
+| `waitingOn` | Whom I am waiting on | When the AI sets `blocked`, it must hold content the user provided; empty in other states. For the exception when the user shelves a card on the page themselves, see §3.2. |
+| `blockingOthers` | Who is waiting on me | A person's name or one sentence. The opposite direction to `waitingOn`; when non-empty, it adds 4 to urgency. |
+| `lane` | Task type | `project` / `standing` / `errand`; determines the required information and how the card is queued. |
+| `cadence` | Expected interval, in days, for a standing task | Integer number of days, used only by `standing`; empty for other types. |
+| `log` | Research Log link | E.g. `[[Research notes]]`; multiple links are joined with ` · `. Linking a notes vault is not a prerequisite for running the board. |
+| `plan` | Progress summary, i.e. the global position of this thread | `{ "summaryAt": epoch-ms, "tracks": [...] }`; when there is no summary, the field is not set. Track format: see §3.6. |
+| `createdAt` / `touchedAt` | Creation time / time of latest activity | Unix milliseconds. Every card edit refreshes `touchedAt`. |
+| `events` | Ledger of notes, field rewrites and state changes | Ascending by `ts`, append-only, unlimited, never truncated. The only exception is the user deleting their own note on the page. |
 
-事件格式由 `board_schema.py` 定义，规则只在服务端这一份；网页和 CLI 不再各自实现迁移或写入规则。
+The event format is defined by `board_schema.py`; the rules exist only in this one place, on the server. The web page and the CLI no longer implement migration or write rules of their own.
 
-| `kind` | 格式 | 含义 |
+| `kind` | Format | Meaning |
 |---|---|---|
-| `note` | `{ts, kind, text}` | 一条记录，来自页面、收件箱归入线程或 CLI `note`。 |
-| `bp` / `na` | `{ts, kind, text}` | 在 `ts` 把断点 / 下一步设为 `text`。记录**新值**；`""` 表示清空。 |
-| `state` | `{ts, kind, to, auto?, noticedAt?}` | 在 `ts` 切换到状态 `to`；`auto: true` 表示 6 小时兜底切出。 |
-| 旧式 `bp` / `na` | `{…, replaced: true}` | 仅由 v1 迁移产生：记录的是在 `ts` 被替换的旧值。不要把它解释为当时设入的新值。 |
-| 旧式 `session` | `{ts, kind, out, noticedAt?}` | 仅由 v1 迁移产生的一次运行会话。 |
-| 任意事件 | `approx: true` | 旧数据缺少时间戳，迁移时采用了估算时间。保留此标记，不得改成精确时间。 |
+| `note` | `{ts, kind, text}` | A note, from the page, from filing an inbox entry under a thread, or from the CLI `note`. |
+| `bp` / `na` | `{ts, kind, text}` | At `ts`, the breakpoint / next action was set to `text`. Records the **new value**; `""` means cleared. |
+| `state` | `{ts, kind, to, auto?, noticedAt?}` | At `ts`, the card switched to state `to`; `auto: true` marks the 6-hour fallback auto-pause. |
+| Legacy `bp` / `na` | `{…, replaced: true}` | Produced only by v1 migration: records the old value that was replaced at `ts`. Do not interpret it as the new value set at that time. |
+| Legacy `session` | `{ts, kind, out, noticedAt?}` | One run session, produced only by v1 migration. |
+| Any event | `approx: true` | The old data had no timestamp, and migration used an estimated time. Keep this marker; do not change it to an exact time. |
 
-以下时间从事件推导，不再另存字段。服务端在每张卡的视图里给出 `derived`（不落库，也不回传），`python3 boardctl.py show <卡片>` 会列出其中的时间：
+The following times are derived from events and are no longer stored as separate fields. The server includes `derived` in each card's view (not stored in the database, and not sent back by clients); `python3 boardctl.py show <card>` lists the times in it:
 
-- `breakpointAt` / `nextActionAt` 是该类最近一条事件的 `ts`，包括带 `replaced` 的旧事件。
-- `enteredAt` / `doneAt` 是当前状态所对应的最后一条 `state` 事件的 `ts`；当前状态不对应时为空。
-- `trashedAt` 是进入垃圾桶的时间；`restoreTo` 是从垃圾桶恢复时要回到的状态。
-- 一次会话从进入 `running` 的状态事件开始，到下一次离开 `running` 的状态事件结束。旧式 `session` 也参与推导；会话列表在 `derived.sessions`，CLI `time` 按天汇总。
+- `breakpointAt` / `nextActionAt` is the `ts` of the most recent event of that kind, including legacy events marked `replaced`.
+- `enteredAt` / `doneAt` is the `ts` of the last `state` event that corresponds to the current state; it is empty when the current state does not correspond.
+- `trashedAt` is the time the card entered the Trash; `restoreTo` is the state the card returns to when restored from the Trash.
+- A session starts at the state event that enters `running` and ends at the next state event that leaves `running`. Legacy `session` events also take part in the derivation; the session list is in `derived.sessions`, and the CLI `time` command totals it by day.
 
-`due`、`deliverable`、`breakpoint`、`nextAction`、`waitingOn`、`blockingOthers`、`cadence`、`log` 为空时不落盘；读取方按「缺失即空」处理。当前 `version` 为 `2`。v1 数据只在服务端导入时迁移一次，不要手工重建历史。
+`due`, `deliverable`, `breakpoint`, `nextAction`, `waitingOn`, `blockingOthers`, `cadence` and `log` are not written to storage when empty; readers treat a missing field as empty. The current `version` is `2`. v1 data is migrated once, only when the server imports it; do not rebuild history by hand.
 
-`lane` 决定填写规格：
+`lane` determines what must be filled in:
 
-| 类型 | 任务形态 | 需要用户提供的信息 | 断点与下一步 |
+| Type | Task shape | Information the user must provide | Breakpoint and next action |
 |---|---|---|---|
-| `project` | 有终点、跨周期，中断后恢复成本高。 | 标题、交付物、断点、下一步、在等什么；有截止日时记录。 | 断点保留已经排除过什么及理由；下一步写动作。 |
-| `standing` | 没有终点，只有进度位置。 | 标题与位置指针。 | 两个字段在这类卡上表示同一件事，只需一个位置指针。 |
-| `errand` | 一次性、坐下就能完成的散活。 | 标题，任务本身就是交付物。 | 不要求填写，也不追问。 |
+| `project` | Has an end point, runs across several periods, and is costly to resume after an interruption. | Title, deliverable, breakpoint, next action, what it is waiting on; record the due date if there is one. | The breakpoint keeps what has already been ruled out and why; the next action states an action. |
+| `standing` | Has no end point, only a position in its progress. | Title and a position pointer. | On this type of card the two fields mean the same thing; one position pointer is enough. |
+| `errand` | A one-off errand that can be finished in one sitting. | Title; the task itself is the deliverable. | Not required, and not asked for. |
 
-常驻卡一律接在就绪队尾，半透明显示，不参与紧急度排序，行上只显示多久没动（2026-10-19 起；之前超过 `cadence` 会挤回主队列）。
+Standing cards always go at the end of the ready queue, are shown semi-transparent, take no part in urgency ranking, and their row shows only how long they have been idle (since 2026-10-19; before that, a standing card past its `cadence` was pushed back into the main queue).
 
-## 2. 每次写入的统一流程
+## 2. The standard flow for every write
 
-1. 通过 CLI 或已认证的 API **重新读取服务当前数据**。只读目标卡或骨架投影，不从记忆、旧输出或磁盘副本恢复当前状态。
-2. 只修改刚读过的目标字段。断点、下一步和问题答案必须来自用户原话，见 §5。
-3. CLI 把这次修改作为一个标准操作发给服务（`POST /api/ops`，见 [OPS.md](OPS.md)）。改字段时附上刚读到的旧值（`if`）；服务在同一写锁、同一事务内核对、执行，并记一行操作日志。
-4. 以服务返回的成功响应为准。成功写入自动广播到已打开的网页，不需要再向本机发送通知。
-5. 失败时不写任何本地副本：
-   - 「刚被别处改过」（409）：要改的字段在读取之后被别人改了，这次什么都没写。重新读取目标卡，确认原意仍成立再操作；不自动重试。
-   - 「违反看板规则」（422），例如已有别的 `running` 卡：按提示先处理那条规则，不绕过。
-   - 网络超时：CLI 已用同一操作编号重试过一次，服务按编号去重，不会重复追加。仍失败时先重新读取，确认是否已生效，再决定是否重做。
-   - 「服务端与客户端版本不匹配」：更新 CLI 或服务，不改用别的写法。
+1. **Re-read the service's current data** through the CLI or the authenticated API. Read only the target card or the skeleton projection; do not reconstruct the current state from memory, old output or a copy on disk.
+2. Change only the target fields you have just read. Breakpoints, next actions and answers to questions must be the user's own words; see §5.
+3. The CLI sends the change to the service as one standard operation (`POST /api/ops`, see [OPS.md](OPS.md)). When it changes fields, it attaches the old values it just read (`if`); the service checks and executes under one write lock, in one transaction, and writes one line to the operation log.
+4. The success response returned by the service is what counts. A successful write is broadcast automatically to open web pages; there is no need to send a separate notification to the local machine.
+5. On failure, do not write any local copy:
+   - "was just changed elsewhere" (409): the field to be changed was changed by someone else after you read it, and nothing was written this time. Re-read the target card, confirm that the original intent still holds, then act; do not retry automatically.
+   - "Breaks a board rule" (422), for example another card is already `running`: deal with that rule first, as the message says; do not work around it.
+   - Network timeout: the CLI has already retried once with the same operation ID, and the service deduplicates by that ID, so nothing is appended twice. If it still fails, re-read first to check whether the change took effect, then decide whether to redo it.
+   - "Server and client versions do not match": update the CLI or the service; do not switch to another way of writing.
 
-没有整份写入：客户端不能上传或替换整张看板，删除也只能是显式操作，服务不会因为某个客户端手里少了一张卡就删除它。旧的整份写入口 `PUT /board.json` 和 `POST /merge` 已停用（返回 410）。网页「导入覆盖」是唯一的整板替换，需要人确认，服务会先把当前数据导出到数据目录。
+There are no whole-board writes: a client cannot upload or replace the whole board, deletion can only be an explicit operation, and the service never deletes a card because some client is missing it. The old whole-board write endpoints `PUT /board.json` and `POST /merge` are disabled (they return 410). The web page's "Import and overwrite" is the only whole-board replacement; it requires a person's confirmation, and the service first exports the current data to the data directory.
 
-### 2.1 读取投影与 CLI 用法
+### 2.1 Read projections and CLI usage
 
-不要例行把完整 `board.json` 倒进 AI 上下文。先看骨架列表，需要时看单卡；长事件账本只在核对历史时读取。所有命令在代码仓库目录中执行，CLI 自己读取服务数据并提交修改。
+Do not routinely dump the full `board.json` into the AI's context. Look at the skeleton list first, and at a single card when needed; read the long event ledger only when checking history. Run all commands in the code repository directory; the CLI reads the service data and submits changes itself.
 
 ```sh
 python3 boardctl.py list
 python3 boardctl.py list --due
 python3 boardctl.py list --state trashed
 python3 boardctl.py show running --no-log
-python3 boardctl.py show 示例项目 --no-log
-python3 boardctl.py show 示例项目 --events 5
-python3 boardctl.py plan 示例项目
+python3 boardctl.py show 'Example project' --no-log
+python3 boardctl.py show 'Example project' --events 5
+python3 boardctl.py plan 'Example project'
 python3 boardctl.py time --days 7
-python3 boardctl.py note 示例项目 '用户提供的一条进展记录'
-python3 boardctl.py inbox '一条尚未确定归属的想法'
+python3 boardctl.py note 'Example project' 'A progress note the user provided'
+python3 boardctl.py inbox 'An idea that does not belong to a known card yet'
 python3 boardctl.py inbox --list --limit 20
-python3 boardctl.py create '用户提出的新任务' --lane errand
-python3 boardctl.py set 示例项目 due=2027-01-15
-python3 boardctl.py step 示例项目 验证 2
-python3 boardctl.py q 示例项目 1 --decide '用户亲自给出的决定' --user-verbatim
+python3 boardctl.py create 'A new task the user raised' --lane errand
+python3 boardctl.py set 'Example project' due=2027-01-15
+python3 boardctl.py step 'Example project' Verify 2
+python3 boardctl.py q 'Example project' 1 --decide 'A decision the user gave in person' --user-verbatim
 ```
 
-示例中的项目名、轨道名和文字是占位内容，使用时必须替换为实际匹配的卡片及用户提供的内容。ID 前缀或标题子串也可定位卡片；有歧义时补全 ID，不猜。
+The project names, track names and text in these examples are placeholders; in real use, replace them with the card that actually matches and with the content the user provided. An ID prefix or a title substring also identifies a card; if it is ambiguous, give the full ID instead of guessing.
 
-`breakpoint`、`nextAction` 以及 `q` 的 `answer` 不带 `--user-verbatim` 就写不进去。这个参数提醒操作人核对原话，不能把 AI 起草的文字变成用户原话。当前可用命令和参数以 `python3 boardctl.py --help` 及对应子命令的 `--help` 为准。CLI 没有的操作不能通过直写数据文件绕过；如确需程序操作，只能调用 [OPS.md](OPS.md) 列出的标准操作。`python3 boardctl.py ops --limit 20` 列出最近的操作日志：哪个客户端在什么时候用哪个操作改了哪张卡；查误改或找回被删内容时从这里开始。
+`breakpoint`, `nextAction` and the `answer` of a `q` cannot be written without `--user-verbatim`. The flag reminds the operator to check that the text is the user's own words; it cannot turn AI-drafted text into the user's words. The commands and flags currently available are those shown by `python3 boardctl.py --help` and each subcommand's `--help`. An operation the CLI does not offer must not be worked around by writing the data file directly; if a programmatic operation is truly needed, call only the standard operations listed in [OPS.md](OPS.md). `python3 boardctl.py ops --limit 20` lists the recent operation log: which client changed which card with which operation, and when. Start here when investigating a mistaken change or recovering deleted content.
 
-`python3 boardctl.py notify` 只向配置的服务发送已认证的刷新通知，不能用来掩盖一次失败的写入。
+`python3 boardctl.py notify` only sends an authenticated refresh notification to the configured service; it cannot be used to cover up a failed write.
 
-## 3. 操作手册
+## 3. Operations manual
 
-### 3.1 用户一句话提出的小任务
+### 3.1 A small task the user states in one sentence
 
-先定 `lane`。同事让帮忙的一次性小事通常是 `errand`：只填标题；用户说了谁在等，就填 `blockingOthers`。
+Decide the `lane` first. A one-off favour a colleague asked for is usually an `errand`: fill in only the title; if the user said who is waiting, fill in `blockingOthers`.
 
-只记录用户已经给出的信息。可以把用户描述改写成一句 `deliverable` 验收标准；用户没给截止日、断点、下一步或等待对象时保持空。`state` 为 `ready`，`priority` 默认为 `1`，只有用户说紧急才设 `0`。不要为了填满卡片而编造内容。
+Record only information the user has already given. You may rewrite the user's description as a one-sentence `deliverable` acceptance criterion; if the user gave no due date, breakpoint, next action or waiting-on target, leave those empty. `state` is `ready`; `priority` defaults to `1` and is set to `0` only if the user says it is urgent. Do not invent content to fill out the card.
 
-### 3.2 切换状态
+### 3.2 Switching state
 
-- **同时最多一张 `running` 卡，它是用户的主线。** 用户等 AI 输出时顺手做别的事，不切卡，也不要为此提醒用户切卡；值得留下的内容记到那张卡的备注里（用户 2026-10-21：经常一边等 AI 一边做别的，逐分钟切卡对不上，也用不上）。用户要把主线换成 B、或要离开 A 很久，而 A 仍在运行时，先请用户提供 A 的断点和下一步，原话存入 A 并切回 `ready`，然后才能开始 B。`errand` 不要求断点和下一步；`standing` 只要位置指针。CLI 和服务端都会拒绝同时运行第二张卡，不会自动切出原卡。
-- 断点写下已满 7 天的卡需要重新进入，不能照着旧下一步续跑。开始前请用户重写 `nextAction`，AI 不得代写。不要对不需要断点的散活强行套用这一流程。
-- AI 设 `blocked` 必须先知道用户在等谁或什么；用户没说就问。解除阻塞时清空不再适用的 `waitingOn`。
-- 交付使用 `python3 boardctl.py set <卡片> state=done`，命令会追加状态事件。已交付的卡仍留在服务数据中，不搬走。
-- 用户自己在页面可以直接交付或挂起就绪卡。挂起允许 `waitingOn` 为空，页面会标注未填写；这个例外不允许 AI 猜测等待对象。
-- 页面普通删除是进入 `trashed`，可恢复，不二次确认；垃圾桶内永久删除不可逆，需要确认。AI 不得自行永久删除卡片，必须先获得用户明确授权。
-- 状态改变必须追加 `{ts, kind: "state", to}` 事件并刷新 `touchedAt`；卡片离开 `running` 时同步更新 `lastActiveId`。使用 CLI 或页面完成，不得只改当前 `state` 而漏掉历史。
+- **At most one card is `running` at a time; it is the user's main line of work.** When the user does something else on the side while waiting for AI output, do not switch cards, and do not remind the user to switch cards for it; anything worth keeping goes into that card's notes (user, 2026-10-21: they often do other things while waiting for AI, and switching cards minute by minute neither matches what actually happens nor is of any use). When the user wants to change the main line to B, or will be away from A for a long time, while A is still running: first ask the user for A's breakpoint and next action, store their words in A and move A back to `ready`; only then can B start. An `errand` does not require a breakpoint or next action; a `standing` card needs only its position pointer. Both the CLI and the server refuse to run a second card at the same time; they do not switch the original card out automatically.
+- A card whose breakpoint was written 7 or more days ago must be re-entered (Re-enter); it must not resume by following the old next action. Before starting, ask the user to rewrite `nextAction`; the AI must not write it for them. Do not force this procedure on errands, which need no breakpoint.
+- Before the AI sets `blocked`, it must know whom or what the user is waiting on; if the user has not said, ask. When unblocking, clear any `waitingOn` that no longer applies.
+- To deliver, use `python3 boardctl.py set <card> state=done`; the command appends a state event. Delivered cards stay in the service data and are not moved anywhere.
+- On the page, the user can deliver (Deliver) or shelve (Shelve) a ready card directly. Shelving allows an empty `waitingOn`, and the page marks it as not filled in; this exception does not allow the AI to guess what the card is waiting on.
+- An ordinary delete on the page (Move to trash) puts the card in `trashed`; it can be restored and asks for no second confirmation. Delete forever inside the Trash is irreversible and requires confirmation. The AI must not permanently delete a card on its own; it must first get the user's explicit authorization.
+- A state change must append a `{ts, kind: "state", to}` event and refresh `touchedAt`; when a card leaves `running`, `lastActiveId` is updated at the same time. Do it through the CLI or the page; never change only the current `state` and leave out the history.
 
-**6 小时兜底：** 服务每 60 秒检查运行卡；超过上限后自动切回 `ready`，追加 `{kind: "state", to: "ready", auto: true}`。事件的 `ts` 取「进入运行的时间加 6 小时」，不能取发现时间；发现过晚时另记 `noticedAt`。这样服务重启等延迟不会制造十几小时的假会话。
+**6-hour fallback:** every 60 seconds the service checks the running card; once it exceeds the cap, the card is moved back to `ready` automatically, appending `{kind: "state", to: "ready", auto: true}`. The event's `ts` is "the time it entered running plus 6 hours", not the time the overrun was noticed; if it is noticed late, `noticedAt` is recorded as well. This way, delays such as a service restart do not create fake sessions of a dozen hours or more.
 
-上限由 `board_schema.py` 的 `CAP_MS` 定义，`web/js/rank.js` 的 `SESSION_CAP_MS` 必须一致。自动切出**一个字也不写断点或下一步**；页面提示用户回来补。它是服务内部的一个标准操作（`board.sweep`），与 API 写入共用写锁和事务，也记入操作日志。
+The cap is defined by `CAP_MS` in `board_schema.py`; `SESSION_CAP_MS` in `web/js/rank.js` must match it. The auto-pause writes **not a single word into the breakpoint or next action**; the page prompts the user to fill them in on return. It is an internal standard operation of the service (`board.sweep`), shares the write lock and transaction with API writes, and is also recorded in the operation log.
 
-### 3.3 记录一句进展或散落想法
+### 3.3 Recording a line of progress or a stray thought
 
-`python3 boardctl.py note <卡片> '记录内容'` 向卡片追加 `note` 事件。文字可以是用户原话或不改变意思的一句话压缩，不能修改已经存在的记录。
+`python3 boardctl.py note <card> 'note text'` appends a `note` event to the card. The text may be the user's own words or a one-sentence condensation that does not change the meaning; existing notes must not be modified.
 
-不确定属于哪张卡，就用 `python3 boardctl.py inbox '记录内容'`，不要猜归属。页面把收件箱条目归入线程时，向该卡追加 `note` 事件，再移除收件箱条目。
+If you are not sure which card it belongs to, use `python3 boardctl.py inbox 'note text'`; do not guess where it belongs. When the page files an inbox entry under a thread (File under a thread), it appends a `note` event to that card and then removes the inbox entry.
 
-写入任何备注、交付物或进度摘要时，文件、人、会议和结论的第一次出现都要在本句说清。读者只拿到这张卡，也必须能确定每个指代。不得写「旧卡」「上次那个方案」等无法独立核实的话。
+When writing any note, deliverable or progress summary, the first mention of a file, person, meeting or conclusion must be made clear in that same sentence. A reader who has only this card must still be able to resolve every reference. Do not write things like "the old card" or "the approach from last time" that cannot be checked on their own.
 
-用户含糊的话分三种处理：省略的信息向用户问清后补入；用户自己尚未决定的事情标为未定；用户有意保留余地的说法保留疑问语气。不得把「可以加 X 吗」存成「决定加 X」。
+Handle vague wording from the user in three ways: for omitted information, ask the user and then fill it in; mark things the user has not yet decided as undecided; keep the questioning tone of statements in which the user deliberately left room. Never store "could we add X?" as "decided to add X".
 
-### 3.4 长期任务
+### 3.4 Long-term tasks
 
-执行器不得自行完成长期任务的范围和验收设计。先由用户与负责规划的模型讨论范围，按需要建立 Research Log，并一起明确交付物、断点和下一步，再上板。用户明确要求先建卡时，最多按 §3.1 建 `ready` 占位卡，`log` 留空，不冒充已完成规划。
+The executor must not design the scope and acceptance of a long-term task on its own. First the user discusses the scope with the model responsible for planning, sets up a Research Log if needed, and together they settle the deliverable, breakpoint and next action; only then does the task go on the board. If the user explicitly asks for a card first, create at most a `ready` placeholder card per §3.1, leave `log` empty, and do not present it as finished planning.
 
-用户尚无能力判断结果的任务，第一段先建立可核验的验收清单，再执行。不要用「AI 自己觉得做完了」代替验收标准。
+For a task whose results the user cannot yet judge, the first stage is to build a verifiable acceptance checklist, and only then to execute. Do not substitute "the AI thinks it is done" for acceptance criteria.
 
-### 3.5 排队与不能做的“优化”
+### 3.5 Queueing, and "optimizations" you must not make
 
-紧急度由 `web/js/rank.js` 的 `urgency()` 定义：
+Urgency is defined by `urgency()` in `web/js/rank.js`:
 
 ```text
 u = [6,3,1][priority]
-  + min(静置天数 × 0.2, 2)
-  + (有 due：3，再叠临近度 过期10 / 明天8 / 3天内5 / 7天内3 / 14天内1 / 更远0)
-  + (blockingOthers 非空：4)
+  + min(idle days × 0.2, 2)
+  + (has due: 3, plus proximity: overdue 10 / tomorrow 8 / within 3 days 5 / within 7 days 3 / within 14 days 1 / later 0)
+  + (blockingOthers non-empty: 4)
 ```
 
-截止日存在本身加 3，保证明确有截止日的任务不会仅因另一张卡放得久而被压到后面。断点衰减和预计占用判断时间不是紧急度项目。
+Having a due date adds 3 by itself, so that a task with an explicit due date is not pushed back merely because another card has been sitting idle for a long time. Breakpoint decay and the expected amount of the user's judgment time a task will take are not urgency terms.
 
-不要调整 `threads` 数组顺序来排队。只有在同一个宽度为 1.0 的紧急度区间内，页面才用上下文关联打破平局：与 `lastActiveId` 所指卡片共享 Research Log 的任务排前。上下文关联不进入紧急度分数，也不跨区间。
+Do not reorder the `threads` array to queue tasks. Only within the same urgency band, 1.0 wide, does the page use context affinity to break ties: tasks that share a Research Log with the card `lastActiveId` points to go first. Context affinity does not enter the urgency score and does not cross bands.
 
-不要清理、合并或润色已有 `events` 条目。
+Do not clean up, merge or polish existing `events` entries.
 
-### 3.6 重算进度摘要
+### 3.6 Recomputing the progress summary
 
-`breakpoint` 是局部、会衰减、只有用户能写的状态；`plan` 是稳定的全局位置，AI 可以根据卡片已有文字起草，交用户纠错。
+`breakpoint` is local state that decays and that only the user can write; `plan` is the stable global position, which the AI may draft from text already on the card and hand to the user for correction.
 
-只给跨周的 `project` 建摘要。`standing` 只有位置指针，`errand` 不需要摘要。卡上没有 `plan` 是正常状态。
+Build a summary only for a `project` that spans weeks. A `standing` card has only a position pointer, and an `errand` needs no summary. A card without a `plan` is normal.
 
-`tracks` 由互不排序的流程轨道和问题组成：
+`tracks` consists of flow tracks and questions, with no order among them:
 
-| 类型 | 何时使用 | 形状 |
+| Type | When to use | Shape |
 |---|---|---|
-| `flow` | 做完前已经知道应得出什么，例如核对一份已定清单。 | `{kind: "flow", name, steps: [{t, done, detail?}]}`，页面显示成任务追踪（一行一件事）。 |
-| `q` | 必须先得到结果，才知道往哪走。 | `{kind: "q", name, status: "open" \| "decided", answer?, at?, blockedBy?}`，不显示百分比。 |
+| `flow` | What it should produce is known before it is done, for example checking items against a list that is already fixed. | `{kind: "flow", name, steps: [{t, done, detail?}]}`, shown on the page as a task tracker (one item per row). |
+| `q` | You must get a result first before you know which way to go. | `{kind: "q", name, status: "open" \| "decided", answer?, at?, blockedBy?}`; no percentage is shown. |
 
-不能把未知结果的问题伪装成可勾选步骤，也不要把并行问题硬串成固定阶段链。
+Do not disguise a question with an unknown outcome as a step that can be ticked off, and do not force parallel questions into a fixed chain of stages.
 
-- 问题的 `answer` 只能是用户说过的话，用户没定就是 `open`。
-- 用户的试探和保留原样记为 `open`，保持疑问语气。
-- 步骤名使用卡上已有文字，不凭空发明要完成的格子。
-- 格子名是打勾用的短名：动词开头、一件事，目标 15 字以内，服务端上限 30 字。条件、理由、日期、判据和出处放进这一格的 `detail`，页面收在轨道下面的「说明」里，不要写进 `t` 的括号（用户 2026-10-21：「短小精悍、非常简练的那种打勾的」）。
-- 页面把 flow 轨道画成任务追踪：一行一件事，第一件没做的是当前目标，做完的折进「已做 N 件」，不显示总数和进度条。用户可以在页面上直接加一步（回车）或删一步（点两下）。
-- 分两种线来写（用户 2026-10-21：「有的任务它就没有明确的一个规划……中间的步骤还有可能调整」）：
-  - **清单型**：要做哪些事事先就清楚，例如投稿收尾。把已知的步骤全列出来。
-  - **探索型**：下一步要看上一步的结果，例如实习规划。只列已经确定的下一一两件，做完一件再加下一件；方向还没想清楚的写成 `q`，不要为了凑满一张清单编步骤。这就是项目管理里的滚动式规划（rolling wave planning）：近处的事写细，远处的事只留问题，边走边补。
-  - AI 给探索型的线起草时最多列两件已经确定的事；说不清下一步时，问用户，或者写成一个 `q`。
-- 写入整份 plan 用 `python3 boardctl.py plan <卡片> --set plan.json`（内容 `{"tracks": [...]}`）；读完之后别处改过 plan 会被拒绝，不会覆盖。
-- `summaryAt` 只在真正核对或修改轨道内容时刷新，不能因顺手编辑其他字段而刷新。
+- A question's `answer` can only be something the user said; if the user has not decided, it is `open`.
+- The user's tentative ideas and reservations are recorded as they are, as `open`, keeping the questioning tone.
+- Step names use text already on the card; do not invent steps to be completed out of thin air.
+- A step name is a short name for ticking off: it starts with a verb and covers one thing; aim for 15 characters or fewer; the server limit is 30 characters. Conditions, reasons, dates, criteria and sources go into that step's `detail`, which the page folds under "Details" below the track; do not put them in parentheses in `t` (user, 2026-10-21: "short and sharp, the very concise kind you tick off").
+- The page draws a flow track as a task tracker: one item per row; the first unfinished item is the current target; finished items fold into "N done"; no total and no progress bar are shown. The user can add a step directly on the page (Enter) or delete a step (click twice).
+- Write a thread in one of two ways (user, 2026-10-21: "some tasks just don't have a clear plan…the steps in between may still change"):
+  - **Checklist type**: what needs doing is clear in advance, for example wrapping up a paper submission. List all the known steps.
+  - **Exploratory type**: the next step depends on the result of the previous one, for example planning an internship. List only the next one or two items that are already settled, and add the next item after finishing one; write a direction that has not been thought through yet as a `q`; do not invent steps to fill out a list. This is rolling wave planning from project management: near-term work is written in detail, far-off work stays as questions, and the plan is filled in as you go.
+  - When the AI drafts an exploratory thread, it lists at most two items that are already settled; when the next step is unclear, ask the user, or write it as a `q`.
+- To write a whole plan, use `python3 boardctl.py plan <card> --set plan.json` (content `{"tracks": [...]}`); if the plan was changed elsewhere after you read it, the write is rejected rather than overwriting it.
+- `summaryAt` is refreshed only when the track contents are actually checked or changed, never as a side effect of editing other fields.
 
-用户改断点或下一步时，顺手核对摘要。页面提示「摘要落后」时优先核对。勾格子前先读 `python3 boardctl.py plan <卡片>`；问题答案仍需用户原话与 `--user-verbatim`。
+When the user changes the breakpoint or next action, check the summary while you are at it. When the page shows "Summary behind", check it first. Before ticking a step, read `python3 boardctl.py plan <card>`; question answers still require the user's own words and `--user-verbatim`.
 
-`roadmap` 已退役，不要重新引入；全局位置由 `plan` 承担。
+`roadmap` is retired; do not reintroduce it. The global position is carried by `plan`.
 
-### 3.7 已交付卡片
+### 3.7 Delivered cards
 
-已交付卡片仍保留在同一份服务数据中。DONE 视图按推导的 `doneAt` 倒序、按月份分组，使用与就绪队列相同的卡片渲染；默认显示最近 30 张，其余按需展开。月份标题显示该月全部卡片数，不只是当前画出的张数。撤回操作使卡片回到就绪队列，并记录状态变化。
+Delivered cards remain in the same service data. The Delivered view sorts them by the derived `doneAt`, newest first, groups them by month, and renders them the same way as cards in the ready queue; by default it shows the latest 30, and the rest expand on demand. A month header shows the number of all cards in that month, not just the number currently drawn. Reopen returns a card to the ready queue and records the state change.
 
-不得把已交付卡片另存成笔记后从板子移走，不得建立第二套可写归档。需要控制页面开销时使用分页，不拆出会分叉的任务数据副本。
+Do not save delivered cards as notes and then remove them from the board, and do not create a second writable archive. When page cost needs to be kept down, use pagination; do not split off a copy of the task data that could diverge.
 
-## 4. 三行内容的标准
+## 4. Standards for the three lines
 
-- **交付物 `deliverable`：** 写验收标准。可写「统一设置下比较五个模型，并交付可复现结果」；不能写「跑实验、整理数据、写文档」。AI 可以将用户描述改写成验收标准。
-- **断点 `breakpoint`：** 保留用户知道的状态，特别是已经排除过什么及依据。可提示用户说明「baseline 已跑通；哪些失败原因已排除，依据是什么；现在怀疑哪一项」。AI 只能提问，不能替用户补齐或润色答案。
-- **下一步 `nextAction`：** 记录用户给出的直接动作，例如「查 eval 配置里的 max_len 是否为 512」。若是决策，要求用户说明选项和判据；不能代写成「继续推进」。
+- **Deliverable `deliverable`:** write an acceptance criterion. Acceptable: "Compare five models under one shared setting and deliver reproducible results"; not acceptable: "Run experiments, organize data, write docs". The AI may rewrite the user's description as an acceptance criterion.
+- **Breakpoint `breakpoint`:** keep the state the user knows, especially what has already been ruled out and on what evidence. You may prompt the user to state "the baseline runs end to end; which failure causes have been ruled out, and on what evidence; which one is suspected now". The AI may only ask; it must not complete or polish the answer for the user.
+- **Next action `nextAction`:** record the direct action the user gave, for example "Check whether max_len in the eval config is 512". If it is a decision, ask the user to state the options and the criterion; do not write it for them as "keep pushing forward".
 
-## 5. 红线
+## 5. Red lines
 
-- 不猜测、编造或复用记忆中的看板状态；当前服务刚返回的数据才是依据。
-- 不代写或润色用户的断点、下一步；问题答案也只能保存用户说过的话。用户原话粗糙就原样保存。
-- 不把用户保留的可能性写成决定。不确定的进度标「待确认」，不捏造推进。
-- 不重写已有 Research Log；需要记录时只在顶部插入新的日期段，保持最新在前。
-- 不从 Research Log、聊天或笔记库自行“发现”任务并建卡。建卡必须有用户意图依据。
-- 用户只要求改卡时，不擅自修改网页、服务代码或 systemd 配置。
-- 不把真实任务、历史、凭据或备份提交到代码仓库；不把看板数据发布到其他 AI 平台或公开网页。
-- 不因网络故障直写本地 JSON，不建立第二个可写任务源，不用 Git 合并或同步在线任务状态。
-- 不截断或改写事件，不丢卡片 ID，不绕过标准操作直接改数据库，不在真实看板上做试写、清空或删除测试。
+- Do not guess, invent or reuse board state from memory; only data the service has just returned counts.
+- Do not write or polish the user's breakpoint or next action for them; question answers likewise may store only what the user said. If the user's words are rough, store them as they are.
+- Do not write a possibility the user left open as a decision. Mark uncertain progress as "to be confirmed"; do not fabricate progress.
+- Do not rewrite an existing Research Log; when something needs recording, only insert a new dated section at the top, keeping the newest first.
+- Do not "discover" tasks on your own from a Research Log, a chat or a notes vault and create cards for them. Creating a card must be grounded in the user's intent.
+- When the user asks only for card changes, do not change the web page, the service code or the systemd configuration on your own initiative.
+- Do not commit real tasks, history, credentials or backups to the code repository; do not publish board data to other AI platforms or to public web pages.
+- Do not write local JSON directly because of a network failure, do not create a second writable task source, and do not use Git to merge or synchronize live task state.
+- Do not truncate or rewrite events, do not lose card IDs, do not bypass the standard operations to change the database directly, and do not run test writes, wipes or deletion tests on the real board.
 
-## 6. 服务维护与迁移
+## 6. Service maintenance and migration
 
-容器部署由 `single-core-board-compose.service` 管理；原生部署使用 `single-core-board.service`，二者不能同时写同一数据目录。客户端使用配置的受控服务入口；不要要求每台客户端另起服务。认证和访问地址的设置、服务状态检查与备份定时器（本地快照每小时、推送每周）见 [连接配置](SETUP.md)。
+A container deployment is managed by `single-core-board-compose.service`; a native deployment uses `single-core-board.service`; the two must never write to the same data directory at the same time. Clients use the configured, controlled service entry point; do not require each client machine to start its own service. Setting up authentication and the access address, checking service status, and the backup timers (local snapshot hourly, push weekly) are described in [connection setup](SETUP.md).
 
-`GET /events` 为每个浏览器标签页提供 SSE。每个成功的操作提交后自动广播，打开的页面随即重新读取；`POST /notify` 只广播刷新通知。它们都需要认证。页面不缓存未保存的编辑：操作要么已被服务接受，要么明确提示没有保存。
+`GET /events` provides SSE to each browser tab. After each successful operation commits, a broadcast goes out automatically and open pages re-read right away; `POST /notify` only broadcasts a refresh notification. Both require authentication. The page does not cache unsaved edits: an operation has either been accepted by the service, or the page says clearly that it was not saved.
 
-客户端无论在哪里，都访问同一个服务。连接失败就停；连接恢复后重新读取，不把旧客户端状态写回去。
+Wherever a client runs, it talks to the same service. If the connection fails, stop; once the connection is back, re-read, and do not write old client state back.
 
-迁移和恢复属于明确授权后的维护操作，须按以下顺序核对：
+Migration and restore are maintenance operations that need explicit authorization, and must be checked in the following order:
 
-1. 查明旧服务、浏览器和各机器上的写入来源，确认未同步数据，停止旧入口写入；未能确认的来源明确标为未核实。还开着的旧版页面不能再整份写入（410），但会显示写入失败，提醒用户刷新。
-2. 保存原始完整快照，核对摘要、卡片数、事件数、收件箱数，以及 `savedAt`、`lastActiveId`。包含 `done` 和 `trashed`，不只迁移就绪卡。
-3. 在服务停止时用 `board-admin.py import-json <board.json>` 导入仓库外的数据目录。导入会立即导出一次并与原文件逐卡比较，不一致就删掉新库并报错。保留凭据和备份的权限限制。
-4. 启动服务，核对读出的完整性、登录、访问路径和两个备份定时器；写入验证使用独立的虚构数据实例。
-5. 统一网页、CLI 和 AI 的操作入口，再明确宣布完成接管。保留旧快照作为只读备份，不继续运行第二套可写看板。
+1. Identify the write sources on the old service, in browsers and on each machine, confirm any unsynchronized data, and stop writes through the old entry points; explicitly mark any source you could not confirm as unverified. Old-version pages that are still open can no longer write the whole board (410), but they show a write failure that reminds the user to reload.
+2. Save the original complete snapshot and check its digest, card count, event count and inbox count, as well as `savedAt` and `lastActiveId`. Include `done` and `trashed`; do not migrate only the ready cards.
+3. With the service stopped, import into the data directory outside the repository with `board-admin.py import-json <board.json>`. The import immediately exports once and compares the result card by card with the original file; on any mismatch it deletes the new database and reports an error. Keep the permission restrictions on credentials and backups.
+4. Start the service and check the completeness of what it reads back, login, the access path and both backup timers; verify writes on a separate instance with fictional data.
+5. Point the web page, the CLI and the AI at one operation entry point, and only then explicitly announce that the takeover is complete. Keep the old snapshot as a read-only backup; do not keep running a second writable board.
 
-定时快照（导出成 `board.json` 形状）和操作日志里的 `undo` 是恢复材料，不是客户端可写数据源。同机备份不能替代异机备份：本机快照是小时级，异地那份每周才推一次，所以异地最多落后一周是设计如此，超出就要查推送。判断有没有没推出去的提交，看 `local_commit` 与 `remote_commit` 是否相同。恢复整板时先停服务，用 `board-admin.py export-json` 保存当前数据，核对拟恢复快照，再 `import-json --replace` 后启动。只需找回一处误改时，先查 `boardctl.py ops`，用标准操作把它改回来，不整板回滚。
+Scheduled snapshots (exported in the `board.json` shape) and the `undo` entries in the operation log are recovery material, not a data source clients may write to. A backup on the same machine cannot replace an off-machine backup: local snapshots are hourly, while the off-site copy is pushed only weekly, so the off-site copy lagging by up to one week is by design; if it lags more than that, check the push. To tell whether there are commits that have not been pushed, check whether `local_commit` and `remote_commit` are the same. To restore the whole board, stop the service first, save the current data with `board-admin.py export-json`, check the snapshot you intend to restore, then run `import-json --replace` and start the service. When only one mistaken change needs to be recovered, check `boardctl.py ops` first and change it back with a standard operation; do not roll back the whole board.
 
-## 7. 决策轨迹与知识笔记
+## 7. Decision trail and knowledge notes
 
-卡片的 `events[]` 就是完整决策轨迹：记录、断点与下一步的历次新值、每次状态切换都留在同一处。旧版迁移带来的 `replaced`、`session` 和 `approx` 标记必须保留。不要因为换部署方式而重建、截断或重新估算历史。
+A card's `events[]` is the complete decision trail: notes, every new value of the breakpoint and next action, and every state change all stay in one place. The `replaced`, `session` and `approx` markers that came from migrating the old version must be kept. Do not rebuild, truncate or re-estimate history because the deployment method changed.
 
-轨迹留在服务的数据库里，不定期抄入 Research Log，也不建立另一套 Markdown 工作记录。页面可展开记录，CLI `show <卡片>` 可读取完整事件。
+The trail stays in the service's database; it is not periodically copied into a Research Log, and no separate set of Markdown work records is created. The page can expand the notes, and the CLI `show <card>` can read the full events.
 
-如果用户关联了知识笔记库，每轮讨论结束时可识别脱离该项目仍成立的判断，询问用户是否值得写成知识笔记。用户同意后再按笔记库自身规则写入，保留用户原话。工作过程仍留在卡片中，不因生成笔记而删除原记录。独立看板不要求存在特定笔记目录或笔记库指令文件。
+If the user has linked a knowledge-notes vault, at the end of each round of discussion you may identify judgments that still hold outside this project, and ask the user whether they are worth writing up as knowledge notes. Only after the user agrees, write them according to the vault's own rules, keeping the user's own words. The working process stays on the card; the original notes are not deleted because a knowledge note was produced. The standalone board does not require any particular notes directory or vault instruction file to exist.
 
-## 8. 汇报与主动提问
+## 8. Reporting and proactive questions
 
-汇报从结果开始；首次出现的卡片、字段和文件要说清。每处修改用一行列明「卡名 · 字段 · 旧值 → 新值」。用户问答原样带回，未完成或未核实的事情直接说明，不能用「已处理」代替真实结果。
+Start a report with the result; make clear any card, field or file the first time it is mentioned. List each change on one line as "card name · field · old value → new value". Relay questions to and answers from the user verbatim; state plainly what is unfinished or unverified, and never substitute "handled" for the actual result.
 
-工作汇报只保留会影响用户判断的内容，可按以下四格组织，空格省略：
+A work report keeps only what affects the user's judgment. It can be organized in the following four boxes; omit empty boxes:
 
-| 格 | 内容 | 上限 |
+| Box | Content | Limit |
 |---|---|---|
-| 做完了 | 交付物达成的部分或流程轨道完成的格子。 | 1 行。 |
-| 卡在 | 用户提供的当前断点；没有原话时只提示用户填写。 | 1 行。 |
-| 要你定 | 有两条可行路径、且不能由已有授权确定的问题。 | 3 条，每条 1 行。 |
-| 我擅自做了 | 未经单独询问而做了、并改变以后选项的事情。 | 2 条。 |
+| Done | The part of the deliverable achieved, or the flow-track steps completed. | 1 line. |
+| Stuck on | The current breakpoint the user provided; without the user's own words, only prompt the user to fill it in. | 1 line. |
+| For you to decide | Questions that have two viable paths and that existing authorization cannot settle. | 3 items, 1 line each. |
+| Done on my own initiative | Things done without asking separately that change later options. | 2 items. |
 
-四格全空时不为汇报而汇报。常规读文件、接 API、代码风格和尝试过程不进汇报。只有一条可行路径的实现细节由 AI 完成；存在会影响选择的分叉时才交给用户决定。
+When all four boxes are empty, do not report just for the sake of reporting. Routine file reading, API wiring, code style and the trial-and-error process do not go into the report. Implementation details with only one viable path are handled by the AI; only a fork that affects the choice is handed to the user to decide.
 
-只在用户已经和 AI 讨论任务时顺带主动提问，一次最多两张卡，按以下顺序选择：刚离开 `running` 的卡；断点写下超过 7 天的卡；必填字段空着的卡。**`errand` 一律不追问断点和下一步。** 不逐张扫描审问，也不为了提问单独打断用户。
+Ask proactive questions only in passing, when the user is already discussing a task with the AI; at most two cards at a time, chosen in this order: the card that just left `running`; cards whose breakpoint was written more than 7 days ago; cards with required fields left empty. **Never press for a breakpoint or next action on an `errand`.** Do not scan and interrogate card by card, and do not interrupt the user just to ask.

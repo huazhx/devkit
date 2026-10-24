@@ -16,7 +16,7 @@ def main():
             sys.path.insert(0, str(client.parent))
             runpy.run_path(str(client), run_name="__main__")
             return
-    sys.exit("board: 未安装 HTTPS 客户端；请运行独立仓库 deploy/package-client.py")
+    sys.exit("board: the HTTPS client is not installed; run deploy/package-client.py from the standalone repository")
 
 
 if __name__ == "__main__":

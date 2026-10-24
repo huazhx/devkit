@@ -1,27 +1,27 @@
 ---
 name: board
-description: 查看或管理个人任务看板：查询任务、记录进展、修改状态、勾进度和整理收件箱。用户提到看板、board、任务卡或线程状态时使用。
+description: View or manage the personal task board (look up tasks, record progress, change states, tick off progress steps, sort the inbox). Use when the user mentions the board, task cards or thread state.
 ---
 
-通过本 skill 的 `scripts/board.py` 直接调用已配置看板的 HTTPS API；运行环境只需 Python 3.10 及以上版本。安装包包含 CLI 和 schema，可独立运行。
+This skill's `scripts/board.py` calls the HTTPS API of the configured board directly; the runtime needs only Python 3.10 or later. The package contains the CLI and the schema and runs on its own.
 
-连接配置位于 `~/.config/single-core-board/client.json`，含 `url`、`token` 和 `ca_file`（已信任的 Caddy 根证书路径），权限为 `600`。也可通过 `BOARD_URL`、`BOARD_API_TOKEN`、`BOARD_CA_FILE` 或 `BOARD_CLIENT_CONFIG` 指定。保留证书链与 IP 校验，连接失败时停止，不回退到 SSH 或本地任务文件。HTTP 仅允许用于本机隔离实例。
+The connection configuration is in `~/.config/single-core-board/client.json`, with `url`, `token` and `ca_file` (path to the trusted Caddy root certificate), permissions `600`. It can also be given through `BOARD_URL`, `BOARD_API_TOKEN`, `BOARD_CA_FILE` or `BOARD_CLIENT_CONFIG`. Keep certificate-chain and IP verification on; if the connection fails, stop, and do not fall back to SSH or a local task file. HTTP is allowed only for an isolated instance on the local machine.
 
-首次连接或排查配置时读取 [连接配置](references/SETUP.md)，不要把 token 写进对话、卡片或 skill 文件。
+On first connection, or when troubleshooting the configuration, read [Connection setup](references/SETUP.md); never put the token into the conversation, a card or a skill file.
 
 ```sh
-python3 <skill目录>/scripts/board.py list --state ready
-python3 <skill目录>/scripts/board.py show '<卡名或ID>' --no-log
-python3 <skill目录>/scripts/board.py show '<卡名或ID>' --events 5
-python3 <skill目录>/scripts/board.py note '<卡名或ID>' '用户的记录'
-python3 <skill目录>/scripts/board.py set '<卡名或ID>' state=done
-python3 <skill目录>/scripts/board.py inbox --list
-python3 <skill目录>/scripts/board.py ops --limit 20
-python3 <skill目录>/scripts/board.py backup-status
+python3 <skill-dir>/scripts/board.py list --state ready
+python3 <skill-dir>/scripts/board.py show '<card name or ID>' --no-log
+python3 <skill-dir>/scripts/board.py show '<card name or ID>' --events 5
+python3 <skill-dir>/scripts/board.py note '<card name or ID>' 'A note from the user'
+python3 <skill-dir>/scripts/board.py set '<card name or ID>' state=done
+python3 <skill-dir>/scripts/board.py inbox --list
+python3 <skill-dir>/scripts/board.py ops --limit 20
+python3 <skill-dir>/scripts/board.py backup-status
 ```
 
-先查所需的卡，不读取完整 `board.json`。需要历史时只取相关卡最近几条事件。写入只走 CLI：每条命令是服务端的一个标准操作，只改它点名的卡或字段，成功后页面自动刷新。网络中断时 CLI 会用同一操作编号自动重试一次，服务端不会重复执行；报「刚被别处改过」时先重新读取、核实后再决定，不写本地副本、不手动重复写入。`ops --limit 20` 可查最近谁改了什么。
+Look up only the cards you need; do not read the full `board.json`. When history is needed, fetch only the last few events of the relevant card. Writes go only through the CLI: each command is one standard operation on the server, changes only the card or fields it names, and the page refreshes automatically on success. If the network drops, the CLI retries once automatically with the same operation ID, and the server does not execute it twice. When the CLI reports "was just changed elsewhere", re-read first, verify, then decide; do not write a local copy and do not repeat the write by hand. `ops --limit 20` shows who changed what recently.
 
-断点和下一步只能写用户原话；确需修改时加 `--user-verbatim`。不要替用户决定未决事项。切入任务前先核对正在运行的卡，同一时刻最多一张 `running`；它表示用户的主线，用户等 AI 输出时顺手做的事不用切卡。记录第一次出现的人、文件或结论时写清上下文，保留用户的不确定语气。
+Breakpoints and next actions may hold only the user's own words; when a change is truly needed, add `--user-verbatim`. Do not decide open matters for the user. Before switching into a task, check the card that is currently running; at most one card is `running` at a time. It is the user's main line of work; things the user does on the side while waiting for AI output need no card switch. When recording a person, file or conclusion for the first time, state its context, and keep the user's uncertain tone.
 
-在已有项目中遵守该项目的任务权限和 agent 分工。创建卡片、修改计划、处理收件箱、删除或查字段定义时，按需读取 [操作手册](references/BOARD.md)（源码仓库对应 `docs/BOARD.md`）。手册命令中的 `python3 boardctl.py` 对应此处的 `python3 <skill目录>/scripts/board.py`。
+Within an existing project, follow that project's task permissions and division of work among agents. When creating cards, changing a plan, processing the inbox, deleting, or looking up field definitions, read the [operating manual](references/BOARD.md) as needed (in the source repository it is `docs/BOARD.md`). `python3 boardctl.py` in the manual's commands corresponds to `python3 <skill-dir>/scripts/board.py` here.

@@ -1,11 +1,14 @@
-"""客户端安装包：版本号、校验和原子替换（ARCHITECTURE §6）。服务端和 boardctl 共用这一份。
+"""Client package: version, verification and atomic replacement (ARCHITECTURE §6). The server and boardctl share this one copy.
 
-版本号就是包内容的哈希，不手动编号：打包文件改了一个字节，版本就变；没改就不变。
-不算进版本的：安装标记 `.devkit-install.json`、以 `.` 开头的路径（如 macOS 的 .DS_Store）、
-__pycache__ 和 *.pyc —— 它们不是包的内容，算进去会让一份没动过的安装永远「对不上」。
+The version is a hash of the package content, never numbered by hand: change one byte of a
+packaged file and the version changes; change nothing and it stays.
+Not counted in the version: the install marker `.devkit-install.json`, paths starting with `.`
+(such as macOS's .DS_Store), __pycache__ and *.pyc. They are not package content, and counting them
+would make an untouched install "mismatch" forever.
 
-只有带安装标记的目录才会被自动替换：标记由 devkit 的 install-skill.py 写入，意思是
-「这个目录整个归安装程序管，里面没有手写的东西」。仓库检出、没有标记的目录一律不碰。
+Only directories with an install marker are replaced automatically: devkit's install-skill.py
+writes the marker, and it means "the installer owns this whole directory; nothing in it was written
+by hand". A repository checkout or any directory without the marker is never touched.
 """
 import hashlib
 import json
@@ -18,7 +21,7 @@ import tempfile
 
 MARKER = ".devkit-install.json"
 MANAGED = {"source": "huazhx/devkit", "skill": "board"}
-# 包里只允许这种路径：最多一层子目录，各段不以 . 开头，扩展名白名单。挡掉 ../、绝对路径和隐藏文件。
+# The only paths allowed in a package: at most one subdirectory, no segment starting with ., an extension allowlist. Blocks ../, absolute paths and hidden files.
 PATH_RE = re.compile(r"^(?:[A-Za-z0-9_-]+/)?[A-Za-z0-9_-][A-Za-z0-9_.-]*\.(?:md|py|json|txt)$")
 REQUIRED = ("SKILL.md", "scripts/board.py", "scripts/boardctl.py",
             "scripts/board_package.py", "scripts/board_schema.py")
@@ -26,7 +29,7 @@ MAX_BYTES = 2 * 1024 * 1024
 
 
 def files_of(root):
-    """目录里属于安装包的文件：{相对路径: bytes}。"""
+    """The files in a directory that belong to the package: {relative path: bytes}."""
     root = Path(root)
     out = {}
     for p in sorted(root.rglob("*")):
@@ -48,7 +51,7 @@ def version_of(files):
 
 
 def payload(root):
-    """服务端 GET /api/client 的响应体；目录不存在时返回 None（不提供更新）。"""
+    """The response body of the server's GET /api/client; None if the directory does not exist (no updates offered)."""
     if not Path(root).is_dir():
         return None
     files = files_of(root)
@@ -58,24 +61,24 @@ def payload(root):
 
 
 def check(pkg, expected=None):
-    """校验服务端发来的包，返回 {相对路径: bytes}。任何一项不对就抛 ValueError，什么都不装。"""
+    """Verify a package sent by the server and return {relative path: bytes}. Any problem raises ValueError and nothing is installed."""
     files = pkg.get("files") if isinstance(pkg, dict) else None
     if not isinstance(files, dict) or not files:
-        raise ValueError("安装包格式不对")
+        raise ValueError("malformed package")
     out, total = {}, 0
     for rel, text in files.items():
         if not isinstance(rel, str) or not isinstance(text, str) or not PATH_RE.match(rel):
-            raise ValueError(f"安装包里有不允许的路径：{rel!r}")
+            raise ValueError(f"the package contains a path that is not allowed: {rel!r}")
         out[rel] = text.encode("utf-8")
         total += len(out[rel])
     if total > MAX_BYTES:
-        raise ValueError("安装包过大")
+        raise ValueError("the package is too large")
     missing = [r for r in REQUIRED if r not in out]
     if missing:
-        raise ValueError("安装包缺文件：" + ", ".join(missing))
+        raise ValueError("the package is missing files: " + ", ".join(missing))
     version = version_of(out)
     if version != pkg.get("version") or (expected and version != expected):
-        raise ValueError("安装包内容和版本号对不上")
+        raise ValueError("the package content does not match its version")
     return out
 
 
@@ -87,8 +90,8 @@ def managed(root):
 
 
 def install_roots(own_root):
-    """本机所有受管的 board 安装（按真实路径去重）：自己所在的一份，加上各 agent 的默认位置。
-    符号链接（如 ~/.local/share/single-core-board/skill → ~/.agents/skills/board）按指向的目录算。"""
+    """Every managed board install on this machine (deduplicated by real path): the one this file is in, plus each agent's default location.
+    A symlink (such as ~/.local/share/single-core-board/skill → ~/.agents/skills/board) counts as the directory it points to."""
     home = Path.home()
     candidates = [Path(own_root), home / ".claude/skills/board", home / ".agents/skills/board",
                   home / ".local/share/single-core-board/skill", home / ".hermes/skills/board"]
@@ -106,8 +109,8 @@ def install_roots(own_root):
 
 
 def install(files, root):
-    """把一处受管安装整体换成 files，保留安装标记和目录权限。先在同级临时目录写好再一次改名；
-    任何一步失败，原目录原样留着。"""
+    """Replace one managed install with files as a whole, keeping the install marker and the directory mode. Everything is written
+    to a sibling temporary directory first, then renamed in one step; if any step fails, the original directory stays as it was."""
     root = Path(root)
     staged = Path(tempfile.mkdtemp(prefix=".board-update-", dir=root.parent))
     old = None

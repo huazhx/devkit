@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
-"""boardctl — 调度台的操作工具（投影读 + 定向写回）。
+"""boardctl — the board's operations tool (projected reads + targeted writes).
 
-客户端通过 API 读取任务，只输出所需字段；完整 JSON 不需要装入模型上下文。
+The client reads tasks through the API and prints only the fields needed; the full JSON never has
+to enter a model's context.
 
-写入一律是 `POST /api/ops` 的标准操作（docs/OPS.md）：每次只点名一张卡、一个字段或
-一条收件箱条目，不上传整份看板。状态切换、事件账本、计划戳等数据规则只在服务端执行。
-服务不可达时退出，不写本地文件。连接配置见 README.md。
+Every write is a standard operation via `POST /api/ops` (docs/OPS.md): each one names a single card,
+field or inbox item and never uploads the whole board. Data rules such as state changes, the event
+ledger and plan stamps run only on the server. If the service is unreachable the tool exits and
+writes no local file. Connection setup: README.md.
 
-用法
-  boardctl.py list                      # 全部卡的骨架
-  boardctl.py list --due                # 按截止日排序
-  boardctl.py show running              # 当前 running 那张
-  boardctl.py show example-card        # id 前缀 / 标题子串都行（有歧义会报错）
-  boardctl.py show 示例项目 --no-log     # 不读取 events
-  boardctl.py note 示例项目 "完成合成数据验证"
-  boardctl.py set 示例项目 due=2027-01-15 priority=0
-  boardctl.py step 示例项目 验证 2       # 勾选第 2 格（--undone 取消）
-  boardctl.py plan 示例项目 --set plan.json  # 整份替换 plan（格子名 ≤ 30 字，说明放 detail）
-  boardctl.py q 示例项目 1 --decide "采用方案 A" --user-verbatim
-  boardctl.py time --days 7             # 时间去哪了（与页面「⏱ 时间」视图同口径）
-  boardctl.py inbox "一条还没归卡的想法"   # 记到收件箱（页面上可归入线程 / 升成卡 / 删除）
-  boardctl.py ops --limit 20            # 最近的操作日志（谁在什么时候改了什么）
-  boardctl.py notify                    # 只敲页面刷新
+Usage
+  boardctl.py list                      # skeleton of every card
+  boardctl.py list --due                # sorted by due date
+  boardctl.py show running              # the card that is running now
+  boardctl.py show example-card         # an id prefix or a title substring works (ambiguity is an error)
+  boardctl.py show example-project --no-log   # do not read events
+  boardctl.py note example-project "Finished the synthetic-data check"
+  boardctl.py set example-project due=2027-01-15 priority=0
+  boardctl.py step example-project Validate 2   # tick step 2 (--undone to untick)
+  boardctl.py plan example-project --set plan.json   # replace the whole plan (step names ≤ 30 characters, details go in detail)
+  boardctl.py q example-project 1 --decide "Take option A" --user-verbatim
+  boardctl.py time --days 7             # where the time went (same rules as the page's "Time" view)
+  boardctl.py inbox "An idea not yet filed under a card"   # add to the inbox (the page can file it under a thread, make it a card, or delete it)
+  boardctl.py ops --limit 20            # recent operation log (who changed what, and when)
+  boardctl.py notify                    # only nudge the page to refresh
 
-字段红线（`BOARD.md` §5）没有变：**断点 / 下一步不许代写**。这两个字段要用
-`--user-verbatim` 才写得进去 —— 它是提醒你「这段字得是用户说的」，不是权限位。
+The field red line (`BOARD.md` §5) is unchanged: **never write a breakpoint or next action on the
+user's behalf**. These two fields are written only with `--user-verbatim`, which is a reminder that
+"this text must be the user's own words", not a permission bit.
 """
 
 import argparse
@@ -41,8 +44,8 @@ import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
 
-import board_schema as S   # 迁移 / 事件账本 / 推导：规则只有那一份
-import board_package as P  # 安装包版本与自动更新（ARCHITECTURE §6）
+import board_schema as S   # migrations / event ledger / derivations: the one copy of the rules
+import board_package as P  # package version and auto-update (ARCHITECTURE §6)
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CLIENT_CONFIG = os.path.expanduser(os.environ.get(
@@ -60,7 +63,7 @@ def transport():
     """Verify the configured CA and IP; plain HTTP is only for local instances."""
     url = urllib.parse.urlsplit(SERVER)
     if url.username or url.password or url.query or url.fragment:
-        raise ValueError("BOARD_URL 只能包含协议、主机和端口")
+        raise ValueError("BOARD_URL may contain only the scheme, host and port")
     if url.scheme == "https":
         return ssl.create_default_context(cafile=os.path.expanduser(CA_FILE) if CA_FILE else None)
     if url.scheme == "http":
@@ -71,7 +74,7 @@ def transport():
             local = host == "localhost"
         if local:
             return None
-    raise ValueError("远程看板必须使用 HTTPS；HTTP 仅用于本机隔离实例")
+    raise ValueError("A remote board must use HTTPS; HTTP is only for isolated local instances")
 
 
 def api_token():
@@ -85,7 +88,7 @@ def api_token():
             with open(os.path.expanduser(path), encoding="utf-8") as f:
                 token = json.load(f)["api_token"]
     if not token:
-        die("没有 API 凭据；请配置 BOARD_CLIENT_CONFIG 或 BOARD_CREDENTIALS_FILE。")
+        die("No API credentials; configure BOARD_CLIENT_CONFIG or BOARD_CREDENTIALS_FILE.")
     return token
 
 
@@ -106,9 +109,11 @@ def request(path, data=None, method="GET", headers=None):
         raise
 
 
-# ---- 自动更新（ARCHITECTURE §6）----
-# 服务端在每个 API 响应头里带上它打包的客户端版本。和本机受管安装不一致时，命令结束后从同一个服务
-# 取 GET /api/client，校验后原子替换本机所有受管安装。连接配置在安装目录外，不受影响。
+# ---- Auto-update (ARCHITECTURE §6) ----
+# The server puts the version of the client it packages into every API response header. When it
+# differs from the local managed installs, after the command finishes the client fetches
+# GET /api/client from the same service, verifies it, and atomically replaces every local managed
+# install. The connection config lives outside the install directory and is not touched.
 SKILL_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 _server_client = None
 _update_tried = False
@@ -121,7 +126,9 @@ def _note_server_client(version):
 
 
 def auto_update_enabled():
-    """默认只对真实配置的服务开启：测试和临时实例都会用环境变量改地址或凭据，不能拿它们的包覆盖本机安装。"""
+    """On by default only for the really configured service: tests and temporary instances change
+    the address or credentials through environment variables, and their package must not overwrite
+    the local installs."""
     flag = os.environ.get("BOARD_AUTO_UPDATE")
     if flag is not None:
         return flag == "1"
@@ -132,7 +139,8 @@ def auto_update_enabled():
 
 
 def maybe_update():
-    """有需要就更新，返回是否换过。失败只提示一行，不影响这次命令的结果。"""
+    """Update if needed; return whether anything was replaced. A failure prints one line and does
+    not affect the result of this command."""
     global _update_tried
     if _update_tried or not _server_client or not auto_update_enabled():
         return False
@@ -145,20 +153,22 @@ def maybe_update():
         for root in stale:
             P.install(files, root)
     except Exception as e:
-        print(f"boardctl: 客户端自动更新没有完成（{e}）；这次命令不受影响。"
-              "手动更新见 references/SETUP.md。", file=sys.stderr)
+        print(f"boardctl: client auto-update did not finish ({e}); this command is not affected. "
+              "To update by hand, see references/SETUP.md.", file=sys.stderr)
         return False
-    print(f"boardctl: 已按服务端更新本机看板客户端（{len(stale)} 处，版本 {_server_client}）。", file=sys.stderr)
+    print(f"boardctl: updated the local board client from the server ({len(stale)} installs, "
+          f"version {_server_client}).", file=sys.stderr)
     return True
 
 
 def _version_mismatch(e):
-    """这次被拒是因为客户端和服务端对不上接口（而不是数据或权限问题）。"""
+    """This rejection is because the client and server disagree on the interface (not a data or
+    permission problem)."""
     err = _error_body(e).get("error")
     return (e.code in (405, 410) or (e.code == 404 and err != "not_found")
             or (e.code == 400 and err == "api_version"))
 
-# `set` 允许写的字段。id / events / plan / createdAt 等走各自的命令或不允许改。
+# Fields `set` may write. id / events / plan / createdAt etc. go through their own commands or may not be changed.
 SETTABLE = {
     "title", "state", "priority", "due", "deliverable", "breakpoint", "nextAction",
     "waitingOn", "blockingOthers", "lane", "cadence", "log",
@@ -171,7 +181,7 @@ LANES = {"project", "standing", "errand"}
 
 
 def fmt_dur(ms):
-    """与 rank.js 的 fmtDur 同格式：一律 NhMMm，好竖着扫。"""
+    """Same format as fmtDur in rank.js: always NhMMm, so a column scans easily."""
     m = max(0, int(round(ms / 60000)))
     return f"{m // 60}h{m % 60:02d}m"
 
@@ -186,15 +196,15 @@ def now_ms():
 
 
 def load():
-    """服务是唯一读源；网络失败时不回落到旧快照。"""
+    """The service is the only read source; a network failure does not fall back to an old snapshot."""
     try:
         return S.migrate_board(request("/board.json"))
     except Exception as e:
-        die(f"无法读取服务 {SERVER}（{e}）；没有读取本地快照。")
+        die(f"Cannot read the service {SERVER} ({e}); no local snapshot was read.")
 
 
 def resolve(board, ref):
-    """id → id 前缀 → 标题全等 → 标题子串；'running' 当状态关键字。"""
+    """id → id prefix → exact title → title substring; 'running' works as a state keyword."""
     cards = board["threads"]
     for pred in (
         lambda c: c.get("id") == ref,
@@ -207,16 +217,16 @@ def resolve(board, ref):
         if len(hits) == 1:
             return hits[0]
         if len(hits) > 1:
-            die("匹配到多张卡，请给更长的 id 前缀：\n"
+            die("More than one card matches; give a longer id prefix:\n"
                 + "\n".join(f"  {c['id'][:8]}  {c['title']}" for c in hits))
-    die(f"找不到匹配「{ref}」的卡")
+    die(f"No card matches '{ref}'")
 
 
-API_VERSION = 1   # docs/OPS.md 的接口版本；服务端不认识时回 400
+API_VERSION = 1   # interface version of docs/OPS.md; the server answers 400 if it does not know it
 
 
 def _error_body(e):
-    if not hasattr(e, "board_body"):    # 响应体只能读一次；判断和报错都要用
+    if not hasattr(e, "board_body"):    # the response body can be read only once; both the check and the message need it
         try:
             e.board_body = json.loads(e.read().decode("utf-8") or "{}")
         except Exception:
@@ -225,38 +235,39 @@ def _error_body(e):
 
 
 def _op_failure(e):
-    """把服务端的拒绝翻译成「发生了什么、下一步该怎么做」。所有分支都意味着这次什么都没写。"""
+    """Turn a server rejection into "what happened, and what to do next". Every branch means
+    nothing was written this time."""
     body = _error_body(e)
     err, detail = body.get("error"), body.get("detail") or ""
     if e.code == 400 and err == "api_version":
-        return f"服务端与客户端版本不匹配（{detail}）；未写入。更新 CLI 后再试。"
+        return f"Server and client versions do not match ({detail}); nothing written. Update the CLI and try again."
     if e.code == 400:
-        return f"服务端拒绝了这个操作（参数不合法，未写入）：{detail or err}"
+        return f"The server refused this operation (invalid arguments; nothing written): {detail or err}"
     if e.code == 401:
-        return "认证失败（HTTP 401）：检查 API 令牌配置；未写入。"
+        return "Authentication failed (HTTP 401): check the API token configuration; nothing written."
     if e.code == 404 and err == "not_found":
-        return f"找不到要改的对象（未写入）：{detail}。先 list / show 重新确认。"
+        return f"The object to change was not found (nothing written): {detail}. Check again with list / show."
     if e.code in (404, 405, 410):
-        # 旧服务没有 /api/ops（回 404），或新服务拒绝旧式整份写入（回 410）：两边版本对不上
-        return (f"服务端与客户端版本不匹配（HTTP {e.code}{'：' + detail if detail else ''}）；"
-                "未写入。更新 CLI 或服务后再试。")
+        # An old service has no /api/ops (404), or a new service refuses an old whole-board write (410): the versions do not match
+        return (f"Server and client versions do not match (HTTP {e.code}{': ' + detail if detail else ''}); "
+                "nothing written. Update the CLI or the service and try again.")
     if e.code == 409 and err == "op_id_reused":
-        return f"同一个 opId 配了不同的操作（客户端问题，未写入）：{detail}"
+        return f"The same opId was sent with a different operation (a client problem; nothing written): {detail}"
     if e.code == 409:
-        # 不自动重试：别处刚改过的值要由人看过再决定（OPS.md §5）
-        return (f"目标刚被别处改过（未写入）：{detail}。先 show 重新读一次，"
-                "确认要改的值仍然成立，再重新执行；不要自动重试。")
+        # No automatic retry: a value just changed elsewhere needs a person to look before deciding (OPS.md §5)
+        return (f"The target was just changed elsewhere (nothing written): {detail}. Read it again with show, "
+                "check that the change you want still holds, then run the command again; do not retry automatically.")
     if e.code == 422:
-        return f"违反看板规则（未写入）：{detail}"
-    return f"服务端返回 HTTP {e.code}（未写入）：{detail or err or e.reason}"
+        return f"Breaks a board rule (nothing written): {detail}"
+    return f"The server returned HTTP {e.code} (nothing written): {detail or err or e.reason}"
 
 
 def op(name, args):
-    """发一个标准操作（POST /api/ops），返回服务端的 200 响应体。
+    """Send one standard operation (POST /api/ops) and return the server's 200 response body.
 
-    opId 每个操作新生成一次。网络错误时用**同一个** opId 重试一次：服务端按 opId 去重，
-    所以「第一次其实已经写进去、只是响应丢了」也不会让一条备注记两次。
-    服务端明确拒绝（4xx）时不重试，直接报错退出。"""
+    Each operation gets a fresh opId. On a network error it retries once with the **same** opId: the
+    server deduplicates by opId, so "the first attempt was written and only the response was lost"
+    cannot record a note twice. An explicit server rejection (4xx) is not retried; it exits with an error."""
     body = json.dumps({"api": API_VERSION, "opId": str(uuid.uuid4()), "op": name, "args": args},
                       ensure_ascii=False).encode()
     headers = {"Content-Type": "application/json", "X-Client-Id": "boardctl"}
@@ -264,24 +275,24 @@ def op(name, args):
         try:
             return request("/api/ops", data=body, method="POST", headers=headers)
         except urllib.error.HTTPError as e:
-            # 接口对不上：客户端按服务端更新后，用新版把这条命令重新执行一次（被拒的这次什么都没写）
+            # Interface mismatch: after updating the client from the server, re-run this command once with the new version (the rejected attempt wrote nothing)
             if _version_mismatch(e) and not os.environ.get("BOARD_CLIENT_REEXEC") and maybe_update():
-                print("boardctl: 用新版客户端重新执行这条命令。", file=sys.stderr, flush=True)
+                print("boardctl: re-running this command with the new client.", file=sys.stderr, flush=True)
                 sys.stdout.flush()
                 os.environ["BOARD_CLIENT_REEXEC"] = "1"
                 os.execv(sys.executable, [sys.executable, *sys.argv])
             die(_op_failure(e))
-        except ValueError as e:      # 配置错误（如公网 HTTP）：重试没有意义
-            die(f"写入服务失败（{e}）；没有改写任何本地文件。")
+        except ValueError as e:      # configuration error (e.g. HTTP on a public address): retrying makes no sense
+            die(f"Writing to the service failed ({e}); no local file was changed.")
         except Exception as e:
             if attempt == 2:
-                die(f"写入服务失败（{e}）；已用同一 opId 重试一次。没有改写任何本地文件；"
-                    "先 show 核实这次操作是否已经生效。")
+                die(f"Writing to the service failed ({e}); retried once with the same opId. No local file "
+                    "was changed; check with show whether this operation took effect.")
             time.sleep(1)
 
 
 def changed_card(result, card_id):
-    """操作响应里这张卡的新视图（没变化时返回 None）。"""
+    """The new view of this card in an operation response (None if it did not change)."""
     for c in (result.get("changed") or {}).get("cards") or []:
         if c.get("id") == card_id:
             return c
@@ -289,14 +300,15 @@ def changed_card(result, card_id):
 
 
 def written(result):
-    """一行写入回执：服务端修订号；重复提交时说明没有再执行一次。"""
+    """A one-line write receipt: the server revision; on a repeated submission, says it was not run again."""
     if result.get("duplicate"):
-        return f"服务端已执行过这次操作，没有重复执行（rev={result.get('rev')}）"
-    return f"已写入服务（rev={result.get('rev')}）；页面已自动刷新"
+        return f"the server had already run this operation; it was not run again (rev={result.get('rev')})"
+    return f"written to the service (rev={result.get('rev')}); the page refreshed itself"
 
 
 def derived_of(card):
-    """推导时间戳：优先用服务端给的 derived（规则只在服务端一份），旧服务没给时本地推。"""
+    """Derived timestamps: prefer the server's derived values (the rules exist once, on the server);
+    derive locally only when an old service does not send them."""
     d = card.get("derived")
     if isinstance(d, dict):
         return d
@@ -305,14 +317,14 @@ def derived_of(card):
             "sessions": S.sessions(card)}
 
 
-# ---------------------------------------------------------------- 读
+# ---------------------------------------------------------------- reads
 
 def cmd_list(a):
     board = load()
     cards = board["threads"]
     if a.state:
         cards = [c for c in cards if c.get("state") == a.state]
-    else:   # 垃圾桶里的卡默认不列；要看就 --state trashed
+    else:   # cards in the Trash are not listed by default; use --state trashed to see them
         cards = [c for c in cards if c.get("state") != "trashed"]
     if a.lane:
         cards = [c for c in cards if c.get("lane") == a.lane]
@@ -336,24 +348,24 @@ def cmd_list(a):
         na = (c.get("nextAction") or "").replace("\n", " ")
         if na:
             print(f"{'':<9}↳ {na[:72]}{'…' if len(na) > 72 else ''}")
-    print(f"\n{len(cards)} / {len(board['threads'])} 张  ·  rev={board.get('rev')}  ·  savedAt={board.get('savedAt')}")
+    print(f"\n{len(cards)} / {len(board['threads'])} cards  ·  rev={board.get('rev')}  ·  savedAt={board.get('savedAt')}")
 
 
 def cmd_show(a):
     card = resolve(load(), a.ref)
-    # 推导出的时间戳一并给出：v2 不再把它们落成字段，但读卡的人（和 AI）要用。
-    # 会话列表不放进来——它和 events 一样会无限增长；要看时长用 `time`。
+    # Include the derived timestamps: v2 no longer stores them as fields, but whoever reads the card (and the AI) needs them.
+    # The session list is left out: like events, it grows without bound; use `time` for durations.
     full = derived_of(card)
     derived = {k: full.get(k) for k in ("breakpointAt", "nextActionAt", "enteredAt", "doneAt",
                                         "trashedAt") if full.get(k)}
     if card.get("state") == "trashed" and full.get("restoreTo"):
         derived["restoreTo"] = full["restoreTo"]
     if a.no_log:
-        # events 是不截断的账本，不该整条倒进上下文——要看时长用 `time`
+        # events is an untruncated ledger and should not be dumped into the context whole; use `time` for durations
         card = {k: v for k, v in card.items() if k != "events"}
     elif a.events is not None:
         if a.events < 0:
-            die("--events 必须是不小于 0 的整数")
+            die("--events must be an integer of at least 0")
         events = card.get("events", [])
         card = dict(card, events=events[-a.events:] if a.events else [],
                     eventsOmitted=max(0, len(events) - a.events))
@@ -364,18 +376,18 @@ def cmd_plan(a):
     card = resolve(load(), a.ref)
     plan = card.get("plan")
     if a.set:
-        # 整份换掉这张卡的 plan（一个 card.update，带 if：读完之后别处改过 plan 就拒绝，不覆盖）
+        # Replace this card's whole plan (one card.update with if: if the plan was changed elsewhere after the read, it is refused, not overwritten)
         try:
             src = sys.stdin.read() if a.set == "-" else open(a.set, encoding="utf-8").read()
             new = json.loads(src)
         except (OSError, ValueError) as e:
-            die(f"读不了 plan 文件（{e}）")
+            die(f"Cannot read the plan file ({e})")
         new = {"tracks": new.get("tracks")} if isinstance(new, dict) else new
         result = op("card.update", {"id": card["id"], "set": {"plan": new}, "if": {"plan": plan}})
-        print(f"已更新「{card['title']}」的 plan。{written(result)}")
+        print(f"Updated the plan of '{card['title']}'. {written(result)}")
         return
     if not plan:
-        print(f"「{card['title']}」没有 plan 字段")
+        print(f"'{card['title']}' has no plan field")
         return
     for tr in plan.get("tracks", []):
         if tr.get("kind") == "flow":
@@ -392,8 +404,9 @@ def cmd_plan(a):
 
 
 def cmd_time(a):
-    """时间去哪了 —— 与页面「⏱ 时间」视图同口径（js/rank.js 的时间聚合）：
-    ① 跨午夜的会话整条算在开始那天，不切分；② 长度恰好 = 上限的那段是兜底估算，单独标出。"""
+    """Where the time went: same rules as the page's "Time" view (the time aggregation in js/rank.js):
+    ① a session that crosses midnight counts whole on the day it started, not split; ② a session
+    whose length equals the cap exactly is a capped estimate from the auto-pause and is marked separately."""
     board = load()
     now = now_ms()
     today = datetime.fromtimestamp(now / 1000).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -413,11 +426,11 @@ def cmd_time(a):
         entries = [(s["ts"], s["out"], s["capped"]) for s in d.get("sessions") or []]
         st = d.get("enteredAt")
         if S.valid_start(st, now):
-            entries.append((st, now, False))       # 正在跑的那次也算进去
+            entries.append((st, now, False))       # the session running now counts too
         for ts, out, capped in entries:
             row = by_start.get(day_key(ts))
             if row is None:
-                continue                            # 窗口之外
+                continue                            # outside the window
             ms = max(0, int(out - ts))
             row["total"] += ms
             row["count"] += 1
@@ -432,35 +445,36 @@ def cmd_time(a):
                 hit["capped"] += ms
 
     t = rows[0]
-    print(f"今天 {t['day'].strftime('%-m/%-d')}   合计 {fmt_dur(t['total'])} · {t['count']} 次切换"
-          + ("   （含兜底估算）" if t["capped"] else ""))
+    print(f"Today {t['day'].strftime('%-m/%-d')}   total {fmt_dur(t['total'])}, {t['count']} "
+          + ("switch" if t["count"] == 1 else "switches")
+          + ("   (includes capped estimates)" if t["capped"] else ""))
     if not t["cards"]:
-        print("  （还没有记录 —— 账本从第一次切卡开始，过去不回填）")
+        print("  (nothing recorded yet: the ledger starts at the first card switch; the past is not backfilled)")
     for c in sorted(t["cards"], key=lambda x: -x["ms"]):
         print(f"  {fmt_dur(c['ms']):>8}  {c['title']}"
-              + ("   ← 含兜底估算（≥上限，非实测）" if c["capped"] else ""))
-    print(f"\n近 {a.days} 天")
+              + ("   ← includes a capped estimate (reached the cap, not measured)" if c["capped"] else ""))
+    print(f"\nLast {a.days} days")
     for r in rows:
         top = " · ".join(x["title"] for x in sorted(r["cards"], key=lambda x: -x["ms"])[:3])
-        print(f"  {r['day'].strftime('%-m/%-d'):<5} {fmt_dur(r['total']):>8}  {r['count']:>2} 次  {top}"
-              + ("   （含兜底）" if r["capped"] else ""))
+        print(f"  {r['day'].strftime('%-m/%-d'):<5} {fmt_dur(r['total']):>8}  {r['count']:>2}x  {top}"
+              + ("   (includes capped)" if r["capped"] else ""))
 
 
-# ---------------------------------------------------------------- 写
+# ---------------------------------------------------------------- writes
 
 def cmd_note(a):
     card = resolve(load(), a.ref)
     result = op("note.add", {"id": card["id"], "text": a.text})
     fresh = changed_card(result, card["id"]) or card
-    print(f"已记到「{card['title']}」（现 {len(S.notes(fresh))} 条记录）；{written(result)}")
+    print(f"Noted on '{card['title']}' ({len(S.notes(fresh))} notes now); {written(result)}")
 
 
 def cmd_inbox(a):
     if a.list:
         if a.text:
-            die("查看收件箱时不要同时提供要写入的文字")
+            die("Do not give text to write while listing the inbox")
         if a.limit < 1:
-            die("--limit 必须大于 0")
+            die("--limit must be greater than 0")
         items = load().get("inbox", [])
         selected = items[:a.limit]
         if a.json:
@@ -469,23 +483,23 @@ def cmd_inbox(a):
             for item in selected:
                 text = str(item.get("text", "")).replace("\n", " ")
                 print(f"{str(item.get('id', ''))[:8]}  {text[:160]}{'…' if len(text) > 160 else ''}")
-            print(f"\n显示 {len(selected)} / {len(items)} 条；--limit 可调整数量")
+            print(f"\nShowing {len(selected)} / {len(items)} items; --limit changes the number")
         return
     if not a.text or not a.text.strip():
-        die("提供要记入的文字，或用 inbox --list 查看")
+        die("Give the text to add, or use inbox --list to view")
     result = op("inbox.add", {"text": a.text.strip()})
     inbox = (result.get("changed") or {}).get("inbox")
-    count = f"（现 {len(inbox)} 条）" if isinstance(inbox, list) else ""
-    print(f"已记到收件箱{count}；{written(result)}")
+    count = f" ({len(inbox)} items now)" if isinstance(inbox, list) else ""
+    print(f"Added to the inbox{count}; {written(result)}")
 
 
 def cmd_create(a):
     title = a.title.strip()
     if not title:
-        die("标题不能为空")
-    # 「不重复建同名卡」是给 AI 的使用规则（OPS.md §5），不是数据规则，所以留在 CLI
+        die("The title cannot be empty")
+    # "Do not create a second card with the same title" is a usage rule for the AI (OPS.md §5), not a data rule, so it stays in the CLI
     if any(c.get("title") == title for c in load()["threads"]):
-        die("已有同名卡；先查看现有卡片，避免重复创建")
+        die("A card with this title already exists; look at the existing cards first instead of creating a duplicate")
     args = {"title": title, "priority": a.priority, "lane": a.lane}
     for field in ("deliverable", "due", "log", "blockingOthers"):
         value = getattr(a, field)
@@ -493,7 +507,7 @@ def cmd_create(a):
             args[field] = value
     result = op("card.create", args)
     card_id = (result.get("result") or {}).get("id")
-    print(f"已创建「{title}」（{card_id}）；{written(result)}")
+    print(f"Created '{title}' ({card_id}); {written(result)}")
 
 
 def cmd_set(a):
@@ -502,22 +516,22 @@ def cmd_set(a):
     fields, new_state, changed = {}, None, []
     for pair in a.kv:
         if "=" not in pair:
-            die(f"要 k=v 形式，收到「{pair}」")
+            die(f"Expected k=v, got '{pair}'")
         k, v = pair.split("=", 1)
         if k not in SETTABLE:
-            die(f"「{k}」不在可写字段里。可写：{', '.join(sorted(SETTABLE))}")
+            die(f"'{k}' is not a writable field. Writable: {', '.join(sorted(SETTABLE))}")
         if k in USER_ONLY and not a.user_verbatim:
-            die(f"「{k}」是红线字段（BOARD.md §5）——只许存用户说过的话。"
-                f"确认这段字来自用户本人，再加 --user-verbatim。")
+            die(f"'{k}' is a red-line field (BOARD.md §5): it may hold only the user's own words. "
+                f"Confirm this text comes from the user, then add --user-verbatim.")
         if k in INT_FIELDS:
             try:
                 v = None if v in ("", "null") else int(v)
             except ValueError:
-                die(f"{k} 要整数，收到「{v}」")
+                die(f"{k} must be an integer, got '{v}'")
         if k == "state" and v not in STATES:
-            die(f"state 只能是 {'/'.join(sorted(STATES))}")
+            die(f"state must be one of {'/'.join(sorted(STATES))}")
         if k == "lane" and v not in LANES:
-            die(f"lane 只能是 {'/'.join(sorted(LANES))}")
+            die(f"lane must be one of {'/'.join(sorted(LANES))}")
         old = card.get(k)
         if old == v or (old in (None, "") and v in (None, "")):
             continue
@@ -528,16 +542,16 @@ def cmd_set(a):
         changed.append(f"{k}: {old!r} → {v!r}")
 
     if not changed:
-        print("值没变，没写。")
+        print("No value changed; nothing written.")
         return
     if new_state == "running":
-        # 只是提前报错、免得字段已改而状态被拒：真正的「同时只能一张 running」由服务端裁决
+        # Only an early error, so fields are not written while the state is then refused: the server decides the real "only one running card at a time"
         others = [c["title"] for c in board["threads"]
                   if c.get("id") != card.get("id") and c.get("state") == "running"]
         if others:
-            die(f"已有 running 卡：「{'、'.join(others)}」。先切出原卡，再开始这张；本次未保存。")
+            die(f"A card is already running: {', '.join(others)}. Switch out of it before starting this one; nothing was saved.")
     if fields:
-        # if 带上刚读到的旧值：这几个字段在读和写之间被别处改过，服务端就整条拒绝（409）
+        # if carries the old values just read: if these fields were changed elsewhere between the read and the write, the server refuses the whole operation (409)
         result = op("card.update", {"id": card["id"], "set": fields,
                                     "if": {k: card.get(k) for k in fields}})
     if new_state:
@@ -545,9 +559,9 @@ def cmd_set(a):
             result = op("card.state", {"id": card["id"], "to": new_state})
         except SystemExit:
             if fields:
-                print(f"注意：{', '.join(fields)} 已写入；只有 state 没改成 {new_state}。", file=sys.stderr)
+                print(f"Note: {', '.join(fields)} written; only state was not changed to {new_state}.", file=sys.stderr)
             raise
-    print(f"「{card['title']}」已改：")
+    print(f"Changed '{card['title']}':")
     for line in changed:
         print(f"  {line}")
     print(written(result))
@@ -557,49 +571,49 @@ def cmd_step(a):
     card = resolve(load(), a.ref)
     plan = card.get("plan")
     if not plan:
-        die(f"「{card['title']}」没有 plan 字段")
+        die(f"'{card['title']}' has no plan field")
     flows = [t for t in plan.get("tracks", []) if t.get("kind") == "flow"]
     hits = [t for t in flows if t["name"] == a.track] or \
            [t for t in flows if a.track.lower() in t["name"].lower()]
     if len(hits) != 1:
-        die("轨道要唯一：\n" + "\n".join(f"  {t['name']}" for t in flows))
+        die("The track must match exactly one:\n" + "\n".join(f"  {t['name']}" for t in flows))
     steps = hits[0].get("steps") or []
     if not 1 <= a.n <= len(steps):
-        die(f"「{hits[0]['name']}」只有 {len(steps)} 格")
-    # 带上这一格的文字：读和写之间轨道被重排过，服务端会按文字对不上拒绝，而不是勾错格
+        die(f"'{hits[0]['name']}' has only {len(steps)} steps")
+    # Send this step's text: if the track was reordered between the read and the write, the server refuses because the text does not match, instead of ticking the wrong step
     result = op("plan.step", {"id": card["id"], "track": hits[0]["name"], "step": a.n - 1,
                               "done": not a.undone, "if": {"text": steps[a.n - 1].get("t")}})
-    print(f"「{card['title']}」已更新：{hits[0]['name']} 第 {a.n} 格 → "
-          f"{'未完成' if a.undone else '完成'}；{written(result)}")
+    print(f"Updated '{card['title']}': {hits[0]['name']} step {a.n} → "
+          f"{'not done' if a.undone else 'done'}; {written(result)}")
 
 
 def cmd_q(a):
     card = resolve(load(), a.ref)
     plan = card.get("plan")
     if not plan:
-        die(f"「{card['title']}」没有 plan 字段")
+        die(f"'{card['title']}' has no plan field")
     qs = [t for t in plan.get("tracks", []) if t.get("kind") == "q"]
     if not 1 <= a.n <= len(qs):
-        die(f"只有 {len(qs)} 条 q：\n" + "\n".join(f"  {i}. {t['name']}"
-                                                   for i, t in enumerate(qs, 1)))
+        die(f"There are only {len(qs)} q tracks:\n" + "\n".join(f"  {i}. {t['name']}"
+                                                              for i, t in enumerate(qs, 1)))
     if a.decide and not a.user_verbatim:
-        die("q 的 answer 只许是用户说过的话（§3.6）——确认后加 --user-verbatim。")
+        die("A q answer may only be the user's own words (§3.6); confirm, then add --user-verbatim.")
     result = op("plan.q", {"id": card["id"], "n": a.n, "decide": a.decide or None,
                            "today": a.today})
-    print(f"「{card['title']}」的第 {a.n} 条 q → "
-          f"{'decided' if a.decide else 'open'}；{written(result)}")
+    print(f"'{card['title']}' q {a.n} → "
+          f"{'decided' if a.decide else 'open'}; {written(result)}")
 
 
 def cmd_ops(a):
-    """最近的操作日志：谁（actor）在什么时候用哪个操作改了什么。找回误改时从这里查。"""
+    """Recent operation log: who (actor) changed what, when, with which operation. Start here to recover from a mistaken change."""
     if not 1 <= a.limit <= 500:
-        die("--limit 取 1 到 500")
+        die("--limit must be 1 to 500")
     try:
         data = request(f"/api/ops?limit={a.limit}")
     except urllib.error.HTTPError as e:
-        die(_op_failure(e) if e.code in (404, 405, 410) else f"服务端返回 HTTP {e.code}")
+        die(_op_failure(e) if e.code in (404, 405, 410) else f"The server returned HTTP {e.code}")
     except Exception as e:
-        die(f"无法读取操作日志（{e}）")
+        die(f"Cannot read the operation log ({e})")
     entries = data.get("ops", []) if isinstance(data, dict) else data
     if a.json:
         print(json.dumps(entries, ensure_ascii=False, indent=2))
@@ -619,22 +633,22 @@ def cmd_ops(a):
         print(f"{e.get('seq', ''):>6}  {when}  {str(e.get('actor') or ''):<6} "
               f"{str(e.get('op') or ''):<14} {str(target)[:8]:<9}"
               f"{brief[:80]}{'…' if len(brief) > 80 else ''}")
-    print(f"\n显示 {len(entries)} 条（最新在前）；--json 看完整记录")
+    print(f"\nShowing {len(entries)} entries (newest first); --json shows the full records")
 
 
 def cmd_notify(_a):
     try:
         request("/notify", data=b"", method="POST")
-        print("页面已刷新")
+        print("Page refreshed")
     except Exception as e:
-        die(f"服务不可达（{e}）")
+        die(f"Service unreachable ({e})")
 
 
 def cmd_backup_status(_a):
     try:
         print(json.dumps(request("/backup-status"), ensure_ascii=False, indent=2))
     except Exception as e:
-        die(f"无法读取备份状态（{e}）")
+        die(f"Cannot read the backup status ({e})")
 
 
 # ---------------------------------------------------------------- CLI
@@ -644,40 +658,40 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("list", help="全部卡的骨架")
+    s = sub.add_parser("list", help="skeleton of every card")
     s.add_argument("--state"); s.add_argument("--lane")
-    s.add_argument("--due", action="store_true", help="按截止日排序")
+    s.add_argument("--due", action="store_true", help="sort by due date")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_list)
 
-    s = sub.add_parser("show", help="单张卡（id 前缀 / 标题子串 / running）")
+    s = sub.add_parser("show", help="one card (id prefix / title substring / running)")
     s.add_argument("ref")
     group = s.add_mutually_exclusive_group()
     group.add_argument("--no-log", action="store_true")
-    group.add_argument("--events", type=int, help="只显示最近 N 条事件")
+    group.add_argument("--events", type=int, help="show only the last N events")
     s.set_defaults(fn=cmd_show)
 
-    s = sub.add_parser("plan", help="看 plan 的轨道与格子；--set FILE 整份替换（- 读标准输入）")
+    s = sub.add_parser("plan", help="show the plan's tracks and steps; --set FILE replaces it whole (- reads stdin)")
     s.add_argument("ref")
-    s.add_argument("--set", metavar="FILE", help="新 plan 的 JSON（{\"tracks\": [...]}），格子名 ≤ 30 字，说明放 detail")
+    s.add_argument("--set", metavar="FILE", help="JSON of the new plan ({\"tracks\": [...]}); step names ≤ 30 characters, details go in detail")
     s.set_defaults(fn=cmd_plan)
 
-    s = sub.add_parser("time", help="时间去哪了（与页面「⏱ 时间」同口径）")
+    s = sub.add_parser("time", help="where the time went (same rules as the page's \"Time\" view)")
     s.add_argument("--days", type=int, default=7)
     s.set_defaults(fn=cmd_time)
 
-    s = sub.add_parser("note", help="追加一条 notes")
+    s = sub.add_parser("note", help="append a note")
     s.add_argument("ref"); s.add_argument("text")
     s.set_defaults(fn=cmd_note)
 
-    s = sub.add_parser("inbox", help="记一条还没归卡的想法到收件箱")
+    s = sub.add_parser("inbox", help="add an idea not yet filed under a card to the inbox")
     s.add_argument("text", nargs="?")
-    s.add_argument("--list", action="store_true", help="只读收件箱")
+    s.add_argument("--list", action="store_true", help="only read the inbox")
     s.add_argument("--limit", type=int, default=20)
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_inbox)
 
-    s = sub.add_parser("create", help="创建任务卡，不自动填写断点和下一步")
+    s = sub.add_parser("create", help="create a task card; the breakpoint and next action are not filled in")
     s.add_argument("title")
     s.add_argument("--priority", type=int, choices=(0, 1, 2), default=1)
     s.add_argument("--lane", choices=sorted(LANES), default="project")
@@ -685,18 +699,18 @@ def main():
         s.add_argument("--" + field, default="")
     s.set_defaults(fn=cmd_create)
 
-    s = sub.add_parser("set", help="改字段：k=v，可给多个")
+    s = sub.add_parser("set", help="change fields: k=v, one or more")
     s.add_argument("ref"); s.add_argument("kv", nargs="+")
     s.add_argument("--user-verbatim", action="store_true",
-                   help="断点/下一步 必须带这个，表示这段字是用户说的")
+                   help="required for breakpoint / nextAction: marks the text as the user's own words")
     s.set_defaults(fn=cmd_set)
 
-    s = sub.add_parser("step", help="勾/取消 plan 里的一格")
+    s = sub.add_parser("step", help="tick / untick one step of the plan")
     s.add_argument("ref"); s.add_argument("track"); s.add_argument("n", type=int)
     s.add_argument("--undone", action="store_true")
     s.set_defaults(fn=cmd_step)
 
-    s = sub.add_parser("q", help="改 plan 里的一条 q")
+    s = sub.add_parser("q", help="change one q track of the plan")
     s.add_argument("ref"); s.add_argument("n", type=int)
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument("--decide", metavar="ANSWER")
@@ -705,21 +719,21 @@ def main():
     s.add_argument("--today", default=time.strftime("%Y-%m-%d"))
     s.set_defaults(fn=cmd_q)
 
-    s = sub.add_parser("ops", help="最近的操作日志（最新在前）")
+    s = sub.add_parser("ops", help="recent operation log (newest first)")
     s.add_argument("--limit", type=int, default=20)
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_ops)
 
-    s = sub.add_parser("notify", help="敲一下页面刷新")
+    s = sub.add_parser("notify", help="nudge the page to refresh")
     s.set_defaults(fn=cmd_notify)
 
-    s = sub.add_parser("backup-status", help="最近一次本地备份和 GitHub 推送状态")
+    s = sub.add_parser("backup-status", help="status of the latest local backup and GitHub push")
     s.set_defaults(fn=cmd_backup_status)
 
     a = p.parse_args()
     if getattr(a, "open_", False):
         a.decide = None
-    atexit.register(maybe_update)   # 命令（含 die 退出）结束后再更新：不改正在运行的这一次
+    atexit.register(maybe_update)   # update after the command ends (including a die exit): never change the run in progress
     a.fn(a)
 
 
