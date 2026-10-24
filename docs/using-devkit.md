@@ -1,31 +1,31 @@
-# 使用 devkit
+# Using devkit
 
-`devkit` 是公开的工具和 agent skills 仓库。克隆仓库后，按需安装其中的工具；克隆本身不会修改 Claude Code、shell 或订阅配置。
+`devkit` is a public repository of tools and agent skills. After cloning it, install only the tools you need; cloning alone changes nothing in Claude Code, the shell or subscription settings.
 
-- `skills/board/`：看板客户端 skill，用于查询任务、记录进展和修改状态。
-- `install-skill.py`：把指定 skill 安装到当前用户的 agent 目录。
-- `claude-subscriptions/`：独立的 Claude Code 订阅切换工具，用法见它自己的 [README](../claude-subscriptions/README.md)。
+- `skills/board/`: the board client skill, for looking up tasks, recording progress and changing states.
+- `install-skill.py`: installs a given skill into the current user's agent directory.
+- `claude-subscriptions/`: a separate tool for switching Claude Code subscriptions; see its own [README](../claude-subscriptions/README.md).
 
-## 给新机器 agent 的安装 prompt
+## Install prompt for an agent on a new machine
 
-将下面整段交给新机器上的 Claude Code：
+Hand the whole block below to Claude Code on the new machine:
 
 ```text
-请为这台机器当前用户的 Claude Code 安装 https://github.com/huazhx/devkit 中的 board skill。
+Install the board skill from https://github.com/huazhx/devkit for Claude Code, for the current user on this machine.
 
-请完成以下操作；仓库下载后先阅读 README.md、docs/using-devkit.md 和 skills/board/references/SETUP.md：
-1. 检查 Git 和 Python 3.10+，将仓库克隆到 ~/git/devkit。若已有同一仓库且工作区干净，执行 git pull --ff-only；遇到目录冲突或本机改动，保留并报告。
-2. 执行 python3 ~/git/devkit/install-skill.py board。只安装 board；若安装器报告已有非它管理的目录或 symlink，保留并报告，不强制替换。
-3. 复用已有连接配置。缺少 HTTPS 地址、API token 或所需的 CA 根证书时，先完成 skill 安装，再一次性列出缺项。token 由我在本机配置，不要让我粘贴进对话，也不要输出或提交它。CA 只需要公开根证书，不需要私钥；保持 TLS 验证开启。
-4. 运行 python3 ~/.claude/skills/board/scripts/board.py --help 验证客户端。连接配置齐全后，再运行同一路径的 board.py list 做只读检查，不写测试任务。
-5. 最后分别报告安装结果和连接结果，列出仍缺的信息，并告诉我如何在 Claude Code 新会话里调用 /board 查看当前任务。
+Do the following; after downloading the repository, read README.md, docs/using-devkit.md and skills/board/references/SETUP.md first:
+1. Check for Git and Python 3.10+, then clone the repository to ~/git/devkit. If the same repository already exists and its working tree is clean, run git pull --ff-only; if there is a directory conflict or local changes, keep them and report.
+2. Run python3 ~/git/devkit/install-skill.py board. Install only board; if the installer reports an existing directory or symlink it does not manage, keep it and report, do not force a replacement.
+3. Reuse any existing connection config. If the HTTPS address, the API token or a needed CA root certificate is missing, finish installing the skill first, then list everything missing in one go. I will set the token on this machine myself: do not ask me to paste it into the conversation, and do not print or commit it. For the CA you only need the public root certificate, never the private key; keep TLS verification on.
+4. Run python3 ~/.claude/skills/board/scripts/board.py --help to check the client. Once the connection config is complete, run board.py list from the same path as a read-only check; do not write test tasks.
+5. Finally, report the install result and the connection result separately, list what is still missing, and tell me how to call /board in a new Claude Code session to see the current tasks.
 ```
 
-这个 prompt 安装客户端。能否连接取决于看板服务是否已经提供可用的 HTTPS 入口，以及这台机器是否配置了连接信息。
+This prompt installs the client. Whether it can connect depends on whether the board service already has a working HTTPS entry point and whether this machine has the connection details.
 
-## 手动安装
+## Manual install
 
-在运行 Claude Code 的同一个系统用户下执行，要求 Git 和 Python 3.10 及以上版本，无需第三方 Python 包：
+Run this as the same system user that runs Claude Code. It needs Git and Python 3.10 or later, and no third-party Python packages:
 
 ```sh
 mkdir -p ~/git
@@ -34,49 +34,51 @@ python3 ~/git/devkit/install-skill.py board
 python3 ~/.claude/skills/board/scripts/board.py --help
 ```
 
-公开仓库可以匿名克隆，无需 GitHub token 或私有仓库权限。默认目标是 `~/.claude/skills/board`。如果 `~/git/devkit` 已存在，先核对仓库来源和本地改动，再按下文更新，不要覆盖目录。
+The public repository can be cloned anonymously, with no GitHub token or private-repository access. The default target is `~/.claude/skills/board`. If `~/git/devkit` already exists, check the repository's origin and local changes first, then update as described below; do not overwrite the directory.
 
-如果目标机器运行 Codex，将安装命令改为：
+If the target machine runs Codex, change the install command to:
 
 ```sh
 python3 ~/git/devkit/install-skill.py board --agent codex
 ```
 
-Codex 的目标目录是 `~/.agents/skills/board`，后续客户端命令相应使用该目录。
+The Codex target directory is `~/.agents/skills/board`; use that directory in the client commands that follow.
 
-## 连接看板并使用
+## Connect to the board and use it
 
-按 [Board 连接配置](../skills/board/references/SETUP.md) 配置 `~/.config/single-core-board/client.json`，权限设为 `600`。需要看板的 HTTPS 地址、看板 API token；服务使用私有 CA 时，还需要相应的公开根证书路径。连接文件和证书放在 skill 目录外。
+Following the [board connection setup](../skills/board/references/SETUP.md), write `~/.config/single-core-board/client.json` with permissions `600`. You need the board's HTTPS address and the board API token; if the service uses a private CA, you also need the path to its public root certificate. The connection file and the certificate live outside the skill directory.
 
-新机器需要能读取这份根证书；另一台机器已经信任它，不会自动让新机器也信任它。客户端可直接通过 `ca_file` 使用公开 `.crt` 文件，无需 CA 私钥或系统级安装。
+The new machine must be able to read this root certificate: another machine trusting it does not make the new machine trust it. The client can use the public `.crt` file directly through `ca_file`, with no CA private key and no system-wide install.
 
-配置完成后执行只读检查：
+Once configured, run a read-only check:
 
 ```sh
 python3 ~/.claude/skills/board/scripts/board.py list
 ```
 
-在 Claude Code 新会话里输入：
+In a new Claude Code session, type:
 
 ```text
-/board 查看当前任务
+/board show the current tasks
 ```
 
-也可以要求记录某项任务的进展或修改状态，agent 会按 skill 的操作约束执行。Codex 使用 `$board` 显式调用。
+You can also ask it to record progress on a task or change a state; the agent follows the skill's operating rules. In Codex, call it explicitly with `$board`.
 
-`--help` 成功表示客户端可以运行；`list` 成功才表示当前机器已连接看板。如果缺配置或服务尚未启用 HTTPS，保留已安装的 skill，等连接信息齐全后再验证。证书验证失败时，按连接配置文档排查，保持验证开启。
+A successful `--help` means the client runs; only a successful `list` means this machine is connected to the board. If config is missing or the service does not serve HTTPS yet, keep the installed skill and verify again once the connection details are complete. If certificate verification fails, troubleshoot with the connection setup doc and keep verification on.
 
-## 更新 skill
+## Update the skill
 
-确认仓库来源仍为 `https://github.com/huazhx/devkit.git`，且 `git status --short` 没有本地改动后，执行：
+An installed client updates itself from the board server the next time it connects, so this section is only for updating by hand.
+
+After confirming that the repository's origin is still `https://github.com/huazhx/devkit.git` and that `git status --short` shows no local changes, run:
 
 ```sh
 git -C ~/git/devkit pull --ff-only
 python3 ~/git/devkit/install-skill.py board
 ```
 
-Codex 安装时继续使用 `--agent codex`。安装器会更新自己安装的 skill；位于目录外的连接配置和根证书保持不动。更新完成后，在 agent 新会话中使用。
+For a Codex install, keep using `--agent codex`. The installer updates the skill it installed; the connection config and root certificate outside the directory stay untouched. Use the updated skill in a new agent session.
 
-如果安装器报告已有其他来源的目录或 symlink，它会保留原路径并停止。先确认旧 skill 的来源和迁移方式，再决定如何处理。
+If the installer reports an existing directory or symlink from another source, it keeps the original path and stops. Find out where the old skill came from and how to migrate it before deciding what to do.
 
-本仓库不包含看板服务器、任务数据、访问凭据或部署证书。安装或更新 skill 不会部署服务器，也不会自动创建连接配置。
+This repository holds no board server, task data, credentials or deployment certificates. Installing or updating the skill does not deploy a server and does not create the connection config.

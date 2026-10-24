@@ -129,7 +129,7 @@ class PublicSkillTest(unittest.TestCase):
         result = self.cli("list", "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)[0]["title"], "Synthetic task")
-        literal = "测试 ' \" ; $(touch should-not-exist)\n第二行"
+        literal = "test (non-ASCII: \u00e9) ' \" ; $(touch should-not-exist)\nsecond line"
         result = self.cli("note", "synthetic-card", literal)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(Handler.board["threads"][0]["events"][-1]["text"], literal)
@@ -142,7 +142,7 @@ class PublicSkillTest(unittest.TestCase):
         expected["threads"][0]["title"] = "Renamed elsewhere"
         result = self.cli("set", "synthetic-card", "title=Renamed here")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("刚被别处改过", result.stderr)
+        self.assertIn("just changed elsewhere", result.stderr)
         self.assertEqual(Handler.board, expected)
 
     def test_invalid_trust_hostname_and_public_http_are_rejected(self):
@@ -154,7 +154,7 @@ class PublicSkillTest(unittest.TestCase):
                             BOARD_CA_FILE=str(self.root / "ca.crt"))
         self.assertNotEqual(mismatch.returncode, 0)
         self.assertIn("mismatch", mismatch.stderr)
-        self.assertIn("必须使用 HTTPS", self.cli("list", BOARD_URL="http://192.0.2.1:8765").stderr)
+        self.assertIn("must use HTTPS", self.cli("list", BOARD_URL="http://192.0.2.1:8765").stderr)
 
     def test_update_preserves_config_and_refuses_unmanaged_paths(self):
         destination = self.root / "update-test"
