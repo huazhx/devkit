@@ -176,7 +176,7 @@ SETTABLE = {
 INT_FIELDS = {"priority", "cadence"}
 USER_ONLY = {"breakpoint", "nextAction"}
 STATES = {"ready", "running", "blocked", "done", "trashed"}
-LANES = {"project", "standing", "errand"}
+LANES = {"project", "standing", "errand", "claude"}
 
 
 

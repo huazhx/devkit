@@ -11,6 +11,7 @@ On first connection, or when troubleshooting the configuration, read [Connection
 
 ```sh
 python3 <skill-dir>/scripts/board.py list --state ready
+python3 <skill-dir>/scripts/board.py list --lane claude
 python3 <skill-dir>/scripts/board.py show '<card name or ID>' --no-log
 python3 <skill-dir>/scripts/board.py show '<card name or ID>' --events 5
 python3 <skill-dir>/scripts/board.py note '<card name or ID>' 'A note from the user'
@@ -20,7 +21,7 @@ python3 <skill-dir>/scripts/board.py ops --limit 20
 python3 <skill-dir>/scripts/board.py backup-status
 ```
 
-Look up only the cards you need; do not read the full `board.json`. When history is needed, fetch only the last few events of the relevant card. Writes go only through the CLI: each command is one standard operation on the server, changes only the card or fields it names, and the page refreshes automatically on success. If the network drops, the CLI retries once automatically with the same operation ID, and the server does not execute it twice. When the CLI reports "was just changed elsewhere", re-read first, verify, then decide; do not write a local copy and do not repeat the write by hand. `ops --limit 20` shows who changed what recently.
+Cards in the `claude` lane are Claude's own checkpoints (a date to notice, a check to run): the page keeps them in a collapsed zone the user does not read, so Claude reads them here and acts on one when its `due` has come. Look up only the cards you need; do not read the full `board.json`. When history is needed, fetch only the last few events of the relevant card. Writes go only through the CLI: each command is one standard operation on the server, changes only the card or fields it names, and the page refreshes automatically on success. If the network drops, the CLI retries once automatically with the same operation ID, and the server does not execute it twice. When the CLI reports "was just changed elsewhere", re-read first, verify, then decide; do not write a local copy and do not repeat the write by hand. `ops --limit 20` shows who changed what recently.
 
 Breakpoints and next actions may hold only the user's own words; when a change is truly needed, add `--user-verbatim`. Do not decide open matters for the user. Before switching into a task, check the card that is currently running; at most one card is `running` at a time. It is the user's main line of work; things the user does on the side while waiting for AI output need no card switch. When recording a person, file or conclusion for the first time, state its context, and keep the user's uncertain tone.
 

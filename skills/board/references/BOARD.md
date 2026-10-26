@@ -45,7 +45,7 @@ Card fields:
 | `nextAction` | Next action | An action that can be carried out directly; if it is a decision, write it as "Decide: A or B, by criterion C". Every rewrite appends an `na` event. |
 | `waitingOn` | Whom I am waiting on | When the AI sets `blocked`, it must hold content the user provided; empty in other states. For the exception when the user blocks a card on the page themselves, see §3.2. |
 | `blockingOthers` | Who is waiting on me | A person's name or one sentence. The opposite direction to `waitingOn`; when non-empty, it adds 4 to urgency. |
-| `lane` | Task type | `project` / `standing` / `errand`; determines the required information and how the card is queued. |
+| `lane` | Task type | `project` / `standing` / `errand` / `claude`; determines the required information and how the card is queued. |
 | `cadence` | Expected interval, in days, for a standing task | Integer number of days, used only by `standing`; empty for other types. |
 | `log` | Research Log link | E.g. `[[Research notes]]`; multiple links are joined with ` · `. Linking a notes vault is not a prerequisite for running the board. |
 | `plan` | Progress summary, i.e. the global position of this thread | `{ "summaryAt": epoch-ms, "tracks": [...] }`; when there is no summary, the field is not set. Track format: see §3.6. |
@@ -79,8 +79,11 @@ The following times are derived from events and are no longer stored as separate
 | `project` | Has an end point, runs across several periods, and is costly to resume after an interruption. | Title, deliverable, breakpoint, next action, what it is waiting on; record the due date if there is one. | The breakpoint keeps what has already been ruled out and why; the next action states an action. |
 | `standing` | Has no end point, only a position in its progress. | Title and a position pointer. | On this type of card the two fields mean the same thing; one position pointer is enough. |
 | `errand` | A one-off errand that can be finished in one sitting. | Title; the task itself is the deliverable. | Not required, and not asked for. |
+| `claude` | Claude's own checkpoint: the card exists only so that Claude notices a date or runs a check. It is a reminder for Claude, not work the user owes. | Title; `deliverable` says what Claude checks or tells the user; `due` is the day to do it. | Not required, and not asked for. |
 
 Standing cards always go at the end of the ready queue, are shown semi-transparent, take no part in urgency ranking, and their row shows only how long they have been idle (since 2026-10-19; before that, a standing card past its `cadence` was pushed back into the main queue).
+
+**The `claude` lane holds Claude's own checkpoints (user, 2026-10-26: "Open a new section for cards like these, after Inbox, collapsed by default. You read them yourself; looking at them tires me").** Claude reads them from the CLI; the user does not need to look at them. `list`, `list --due` and `show` return them like any other card, and `list --lane claude` lists only them; Claude acts on one when its `due` has come. On the page, live ones (`ready` or `blocked`) appear only in the "For Claude" zone after Inbox, which is collapsed on every load; they are not in Ready or Blocked, take no part in urgency ranking, carry no urgency tint, u value or due chip, and are not offered under the inbox's "File under a thread". A `running`, delivered or trashed one shows where any card in that state would. When Claude creates such a card, it uses `--lane claude`; work the user owes never goes in this lane, and a card the user keeps for their own ideas (for example a `standing` idea pool) stays where it is.
 
 ## 2. The standard flow for every write
 
@@ -103,6 +106,7 @@ Do not routinely dump the full `board.json` into the AI's context. Look at the s
 ```sh
 python3 boardctl.py list
 python3 boardctl.py list --due
+python3 boardctl.py list --lane claude
 python3 boardctl.py list --state trashed
 python3 boardctl.py show running --no-log
 python3 boardctl.py show 'Example project' --no-log
@@ -128,7 +132,7 @@ The project names, track names and text in these examples are placeholders; in r
 
 ### 3.1 A small task the user states in one sentence
 
-Decide the `lane` first. A one-off favour a colleague asked for is usually an `errand`: fill in only the title; if the user said who is waiting, fill in `blockingOthers`.
+Decide the `lane` first. A one-off favour a colleague asked for is usually an `errand`: fill in only the title; if the user said who is waiting, fill in `blockingOthers`. A card that only reminds Claude to notice a date or run a check goes in `claude` (§1).
 
 Record only information the user has already given. You may rewrite the user's description as a one-sentence `deliverable` acceptance criterion; if the user gave no due date, breakpoint, next action or waiting-on target, leave those empty. `state` is `ready`; `priority` defaults to `1` and is set to `0` only if the user says it is urgent. Do not invent content to fill out the card.
 
