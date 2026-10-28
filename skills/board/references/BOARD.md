@@ -27,7 +27,7 @@ Top-level structure:
 ```
 
 - `threads` is the array of cards. Array order carries no queueing meaning; the page does its own sorting.
-- `inbox` is an array of `{ "id": uuid, "ts": epoch-ms, "text": "..." }` objects. The page moves, promotes and deletes entries by `id`; it must not be written as an array of strings.
+- `inbox` is an array of `{ "id": uuid, "ts": epoch-ms, "text": "..." }` objects. The page links, ticks, promotes and deletes entries by `id`; it must not be written as an array of strings. Since 2026-10-29 the inbox **is the to-do catalog**: an entry may also carry `card` (the card it belongs to), `when`, `due`, `wait`, `pick` (`{day, rank, why}`) and `doneAt`; see §1.1.
 - `rev` is the global revision number; every operation that changes data increments it by one. Each card also has its own `rev`. `savedAt` is the Unix millisecond timestamp of the most recent change. Both are for checking only; they are not write tokens and need not be sent back when writing.
 - `lastActiveId` is the ID of the card that most recently **left** `running`. It is updated whenever a card leaves `running`; it only affects context ordering within one urgency band. If it is missing or points to a deleted card, ignore it.
 
@@ -83,7 +83,16 @@ The following times are derived from events and are no longer stored as separate
 
 Standing cards always go at the end of the ready queue, are shown semi-transparent, take no part in urgency ranking, and their row shows only how long they have been idle (since 2026-10-19; before that, a standing card past its `cadence` was pushed back into the main queue).
 
-**The `claude` lane holds Claude's own checkpoints (user, 2026-10-26: "Open a new section for cards like these, after Inbox, collapsed by default. You read them yourself; looking at them tires me").** Claude reads them from the CLI; the user does not need to look at them. `list`, `list --due` and `show` return them like any other card, and `list --lane claude` lists only them; Claude acts on one when its `due` has come. On the page, live ones (`ready` or `blocked`) appear only in the "For Claude" zone after Inbox, which is collapsed on every load; they are not in Ready or Blocked, take no part in urgency ranking, carry no urgency tint, u value or due chip, and are not offered under the inbox's "File under a thread". A `running`, delivered or trashed one shows where any card in that state would. When Claude creates such a card, it uses `--lane claude`; work the user owes never goes in this lane, and a card the user keeps for their own ideas (for example a `standing` idea pool) stays where it is.
+### 1.1 To-dos: one catalog, the main line stays one card (2026-10-29)
+
+User: 「把待办这个事情抽出来，整理一个目录，但是主线是卡片依旧只有一个，待办可以属于某些卡片，但不是非要有主线」.
+
+- **What goes where.** A card's plan steps are that card's own progress points. A small thing done in one sitting (an email, a booking, a form) is a to-do in the catalog, never also a step: one copy per thing. A to-do may belong to a card (`card`) or to none; it never becomes the running card. If one grows into a line of work, `inbox.promote` makes it a card.
+- **Who writes what.** The user adds a line (page input or by telling Claude) and ticks what is done. Claude sorts new entries (`card`, `when`, `due`, `wait`) and writes `pick`: at the user's first message of the day it picks at most 6 open to-dos for that day (`todo pick`, day = the user's local day), ranks them and writes one reason each, by these rules: an outside date that cannot be made up, counted back to a start day; things that wait on someone's reply go out first; what moves the current stage goal before what does not; within a tier, small first; standing work stays out. A to-do left unpicked for several days running gets one keep-or-drop question. The user never has to rank.
+- **On the page.** "Today" (under Running) shows the day's picks in order with their reasons; ticked ones fold into "done today". The "To-dos" zone keeps the one-line input and folds the whole catalog, grouped by card, then "No card", "Later" (`when` after today) and "Waiting on someone". The Running panel lists the to-dos that belong to its card, filtered from the catalog, not copied.
+- **CLI.** `todo list [--today]`, `todo add "<text>" [card=… when=… due=… wait=…]`, `todo set <to-do> key=value…`, `todo pick <to-do> <rank> "<why>" [--day …]`, `todo unpick <to-do>`, `todo done <to-do> [--undo]`. `<to-do>` is an id prefix or a piece of its text. `inbox "<text>"` still adds a to-do.
+
+**The `claude` lane holds Claude's own checkpoints (user, 2026-10-26: "Open a new section for cards like these, after Inbox, collapsed by default. You read them yourself; looking at them tires me").** Claude reads them from the CLI; the user does not need to look at them. `list`, `list --due` and `show` return them like any other card, and `list --lane claude` lists only them; Claude acts on one when its `due` has come. On the page, live ones (`ready` or `blocked`) appear only in the "For Claude" zone after Inbox, which is collapsed on every load; they are not in Ready or Blocked, take no part in urgency ranking, carry no urgency tint, u value or due chip, and are not offered under a to-do's "Belongs to a card". A `running`, delivered or trashed one shows where any card in that state would. When Claude creates such a card, it uses `--lane claude`; work the user owes never goes in this lane, and a card the user keeps for their own ideas (for example a `standing` idea pool) stays where it is.
 
 ## 2. The standard flow for every write
 
@@ -154,7 +163,7 @@ The cap is defined by `CAP_MS` in `board_schema.py`; `SESSION_CAP_MS` in `web/js
 
 `python3 boardctl.py note <card> 'note text'` appends a `note` event to the card. The text may be the user's own words or a one-sentence condensation that does not change the meaning; existing notes must not be modified.
 
-If you are not sure which card it belongs to, use `python3 boardctl.py inbox 'note text'`; do not guess where it belongs. When the page files an inbox entry under a thread (File under a thread), it appends a `note` event to that card and then removes the inbox entry.
+If it is something to do and you are not sure which card it belongs to, use `python3 boardctl.py todo add 'text'` without `card=`; do not guess where it belongs. `inbox.move` (append an entry to a card as a note and remove it) still exists for the CLI and old clients; the page no longer offers it, because linking a to-do to a card (`card`) keeps it a to-do.
 
 When writing any note, deliverable or progress summary, the first mention of a file, person, meeting or conclusion must be made clear in that same sentence. A reader who has only this card must still be able to resolve every reference. Do not write things like "the old card" or "the approach from last time" that cannot be checked on their own.
 

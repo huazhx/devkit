@@ -21,7 +21,12 @@ Usage
   boardctl.py plan example-project --set plan.json   # replace the whole plan (step names ≤ 30 characters, details go in detail)
   boardctl.py q example-project 1 --decide "Take option A" --user-verbatim
   boardctl.py time --days 7             # where the time went (same rules as the page's "Time" view)
-  boardctl.py inbox "An idea not yet filed under a card"   # add to the inbox (the page can file it under a thread, make it a card, or delete it)
+  boardctl.py todo add "Email X about Y" card=example-card due=2026-11-01   # a to-do; card / when / due / wait are optional
+  boardctl.py todo list [--today]       # open to-dos, or today's picks in order with reasons
+  boardctl.py todo set "Email X" wait="X's reply"   # an empty value clears a field
+  boardctl.py todo pick "Email X" 1 "Needs X's reply before 11-02"   # Claude's order for today (BOARD_TZ, default Asia/Shanghai)
+  boardctl.py todo done "Email X"       # --undo to untick
+  boardctl.py inbox "A to-do"           # the same list (the inbox is the to-do catalog since 2026-10-29)
   boardctl.py ops --limit 20            # recent operation log (who changed what, and when)
   boardctl.py notify                    # only nudge the page to refresh
 
@@ -493,6 +498,110 @@ def cmd_inbox(a):
     print(f"Added to the inbox{count}; {written(result)}")
 
 
+# ---------------------------------------------------------------- to-dos (2026-10-29)
+# The inbox is the to-do catalog (OPS.md §4 inbox.*, BOARD.md §1). Claude sorts items (card, dates) and picks today's few.
+# "Today" is the user's local day: BOARD_TZ, default Asia/Shanghai, so a pick made from a server in another zone lands on the page's day.
+
+def local_today():
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo(os.environ.get("BOARD_TZ", "Asia/Shanghai"))).strftime("%Y-%m-%d")
+
+
+def resolve_todo(board, ref):
+    """id → id prefix → text substring, among all items (done ones too, so a tick can be undone)."""
+    items = board.get("inbox", [])
+    for pred in (lambda i: i.get("id") == ref,
+                 lambda i: str(i.get("id", "")).startswith(ref),
+                 lambda i: ref.lower() in str(i.get("text", "")).lower()):
+        hits = [i for i in items if pred(i)]
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            die("More than one to-do matches; give a longer id prefix:\n"
+                + "\n".join(f"  {str(i['id'])[:8]}  {i.get('text', '')[:60]}" for i in hits))
+    die(f"No to-do matches '{ref}'")
+
+
+def todo_line(board, it, day):
+    card = next((c for c in board["threads"] if c.get("id") == it.get("card")), None)
+    tags = []
+    if it.get("pick", {}).get("day") == day:
+        tags.append(f"today #{it['pick']['rank']}")
+    if card:
+        tags.append(card.get("title", ""))
+    for k in ("when", "due"):
+        if it.get(k):
+            tags.append(f"{k} {it[k]}")
+    if it.get("wait"):
+        tags.append(f"waiting: {it['wait']}")
+    if it.get("doneAt"):
+        tags.append("done")
+    text = str(it.get("text", "")).replace("\n", " ")
+    return f"{str(it.get('id', ''))[:8]}  {text[:80]}{'…' if len(text) > 80 else ''}" + (f"   [{' · '.join(tags)}]" if tags else "")
+
+
+def todo_fields(board, pairs):
+    sets = {}
+    for pair in pairs:
+        if "=" not in pair:
+            die(f"Fields are written key=value; got '{pair}'")
+        k, v = pair.split("=", 1)
+        if k not in ("text", "card", "when", "due", "wait"):
+            die("A to-do field is one of text / card / when / due / wait")
+        if k == "card" and v:
+            v = resolve(board, v)["id"]
+        sets[k] = v or None
+    return sets
+
+
+def cmd_todo(a):
+    board = load()
+    day = a.day or local_today()
+    if a.action == "list":
+        items = board.get("inbox", [])
+        if a.today:
+            items = sorted((i for i in items if i.get("pick", {}).get("day") == day), key=lambda i: i["pick"]["rank"])
+        elif not a.all:
+            items = [i for i in items if not i.get("doneAt")]
+        if a.json:
+            print(json.dumps(items, ensure_ascii=False, indent=2))
+            return
+        for it in items:
+            print(todo_line(board, it, day))
+            if a.today and it["pick"].get("why"):
+                print(f"          why: {it['pick']['why']}")
+        print(f"\n{len(items)} to-dos" + (f" picked for {day}" if a.today else "" if a.all else " open"))
+        return
+    if a.action == "add":
+        if not a.args:
+            die("todo add \"<text>\" [card=… when=… due=… wait=…]")
+        text, sets = a.args[0], todo_fields(board, a.args[1:])
+        result = op("inbox.add", {"text": text, **{k: v for k, v in sets.items() if v}})
+        print(f"Added a to-do; {written(result)}")
+        return
+    if not a.args:
+        die(f"todo {a.action} needs a to-do id prefix or a piece of its text")
+    it = resolve_todo(board, a.args[0])
+    if a.action == "set":
+        sets = todo_fields(board, a.args[1:])
+        if not sets:
+            die("Give at least one key=value (an empty value clears the field)")
+        result = op("inbox.update", {"id": it["id"], "set": sets})
+    elif a.action == "pick":
+        if len(a.args) < 3:
+            die("todo pick <to-do> <rank> \"<why it sits here>\" [--day YYYY-MM-DD]")
+        try:
+            rank = int(a.args[1])
+        except ValueError:
+            die("rank must be a whole number")
+        result = op("inbox.update", {"id": it["id"], "set": {"pick": {"day": day, "rank": rank, "why": a.args[2]}}})
+    elif a.action == "unpick":
+        result = op("inbox.update", {"id": it["id"], "set": {"pick": None}})
+    elif a.action == "done":
+        result = op("inbox.done", {"id": it["id"], "done": not a.undo})
+    print(f"{a.action}: {todo_line(board, it, day).split('   [')[0]}; {written(result)}")
+
+
 def cmd_create(a):
     title = a.title.strip()
     if not title:
@@ -684,12 +793,22 @@ def main():
     s.add_argument("ref"); s.add_argument("text")
     s.set_defaults(fn=cmd_note)
 
-    s = sub.add_parser("inbox", help="add an idea not yet filed under a card to the inbox")
+    s = sub.add_parser("inbox", help="add a to-do (same list as todo; kept for old habits)")
     s.add_argument("text", nargs="?")
     s.add_argument("--list", action="store_true", help="only read the inbox")
     s.add_argument("--limit", type=int, default=20)
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_inbox)
+
+    s = sub.add_parser("todo", help="the to-do catalog: list / add / set / pick / unpick / done")
+    s.add_argument("action", choices=("list", "add", "set", "pick", "unpick", "done"))
+    s.add_argument("args", nargs="*", help="add: text [key=value…]; set: to-do key=value…; pick: to-do rank why; done: to-do")
+    s.add_argument("--today", action="store_true", help="list: only today's picks, in order, with reasons")
+    s.add_argument("--all", action="store_true", help="list: include done to-dos")
+    s.add_argument("--day", help="the day for pick / list --today (default: today in BOARD_TZ, Asia/Shanghai)")
+    s.add_argument("--undo", action="store_true", help="done: mark not done")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_todo)
 
     s = sub.add_parser("create", help="create a task card; the breakpoint and next action are not filled in")
     s.add_argument("title")

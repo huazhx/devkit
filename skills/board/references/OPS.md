@@ -12,7 +12,7 @@ Why: before 2026-10, clients uploaded the whole `board.json` and relied on `save
 |---|---|---|
 | `meta` | `key TEXT PRIMARY KEY, value TEXT` | `rev` (global revision number, integer), `saved_at` (time of the latest change, in milliseconds), `last_active_id`, `board_version` (=2) |
 | `cards` | `id TEXT PRIMARY KEY, ord INTEGER, rev INTEGER, body TEXT` | `body` is the whole card as JSON (including `events`; empty fields are not stored), `rev` is this card's revision number, `ord` keeps the array order from the import; a new card takes the maximum + 1 |
-| `inbox` | `id TEXT PRIMARY KEY, ts INTEGER, body TEXT` | `body` is `{id, ts, text}` |
+| `inbox` | `id TEXT PRIMARY KEY, ts INTEGER, body TEXT` | `body` is `{id, ts, text}` plus the optional to-do fields `card`, `when`, `due`, `wait`, `pick`, `doneAt` (§4 `inbox.update`) |
 | `ops` | `seq INTEGER PRIMARY KEY AUTOINCREMENT, op_id TEXT UNIQUE, ts INTEGER, actor TEXT, client_id TEXT, op TEXT, args TEXT, undo TEXT, response TEXT` | Operation log, append-only. `undo` stores the old values of the changed fields, or the full text of a deleted object, for manual recovery |
 
 The schema version is kept in `PRAGMA user_version`. Changing the schema = appending a function to the end of the migration list in `board_store.py`; at startup, migrations that have not run yet are executed in order, one transaction per migration.
@@ -85,10 +85,12 @@ The time `now` is taken once by the server at the start of the operation and sha
 | `card.purge` | `id` | Must be trashed (otherwise 422). Deletes this row; `undo` stores the whole card |
 | `note.add` | `id`, `text` (non-empty) | Appends `{ts: now, kind: "note", text}` |
 | `note.delete` | `id`, `ts`, `text` | Deletes the event with `kind=note` whose `ts` and `text` are both equal (the first one found searching from the end); not found → 404. `undo` stores the deleted entry |
-| `inbox.add` | `text` (non-empty) | New entry `{id: uuid4, ts: now, text}`. `result: {"id": …}` |
+| `inbox.add` | `text` (non-empty); optional `card`, `when`, `due`, `wait` | New entry `{id: uuid4, ts: now, text}` plus the optional fields given, validated as in `inbox.update`. `result: {"id": …}` |
 | `inbox.delete` | `id` | Deletes it; an entry that no longer exists = no change (no error). `undo` stores the entry |
 | `inbox.promote` | `id` | Promotes the entry to a new card: `title`=the first 40 characters of text, `state`=ready, `priority`=2, `lane`=project, `nextAction`=text (records one na event); deletes the entry. Not found → 404. `result: {"id": new card id}` |
 | `inbox.move` | `id`, `card` | Appends the entry's text to `card` as a note and deletes the entry. Either one not found → 404 |
+| `inbox.update` | `id`, `set: {field: value}`, `if` (optional) | The inbox is the to-do catalog (2026-10-29). Settable: `text` (non-empty), `card` (an existing, untrashed card id: the to-do belongs to it; it stays a to-do), `when` (YYYY-MM-DD, not before this day), `due` (YYYY-MM-DD, hard date), `wait` (who or what it waits on), `pick` (`{day: YYYY-MM-DD, rank: int, why: string}`, Claude's order for that day). `null` or `""` clears a field. Unknown field → 400; `if` compares only the named fields, mismatch → 409. `undo` stores the old entry |
+| `inbox.done` | `id`, `done`=true | `done`=true sets `doneAt`=now; false removes it. The entry stays (done to-dos are kept, not deleted). `undo` stores the old entry |
 | `plan.step` | `id`, `track` (an index into `plan.tracks`, or a flow track name: exact match first, then substring; must be unique), `step` (0-based index), `done` (bool), `if: {"text": the text of this step}` (optional) | Sets this step's `done`; `plan.summaryAt`=now. Step text does not match → 409 stale |
 | `plan.q` | `id`, `n` (position among the q tracks, 1-based), `decide` (string or null), `today` (YYYY-MM-DD) | `decide` non-empty: `status`=decided, `answer`, `at`=today; null: `status`=open, delete `answer` and `at`. `plan.summaryAt`=now |
 | `board.import` | `board` (a whole v2 or v1 board), `confirm`=true | Only for the web page's "Import and overwrite" and for maintenance. Not confirmed → 422. First exports the current data to `BOARD_DATA_DIR/pre-import-<ms>.json.gz`, then replaces everything; `undo` records only that file name and the counts |
