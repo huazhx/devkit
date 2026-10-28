@@ -29,9 +29,10 @@ Usage
   boardctl.py ops --limit 20            # recent operation log (who changed what, and when)
   boardctl.py notify                    # only nudge the page to refresh
 
-The field red line (`BOARD.md` §5) is unchanged: **never write a breakpoint or next action on the
-user's behalf**. These two fields are written only with `--user-verbatim`, which is a reminder that
-"this text must be the user's own words", not a permission bit.
+The field red line (`BOARD.md` §5) is unchanged: **never write a next action (or a breakpoint) on the
+user's behalf**. Both fields are written only with `--user-verbatim`, which is a reminder that
+"this text must be the user's own words", not a permission bit. The switch ritual asks the user for the
+next action only; the breakpoint is no longer asked for (2026-10-29), and old values stay readable.
 """
 
 import argparse
@@ -844,7 +845,7 @@ def main():
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_todo)
 
-    s = sub.add_parser("create", help="create a task card; the breakpoint and next action are not filled in")
+    s = sub.add_parser("create", help="create a task card; the next action is not filled in")
     s.add_argument("title")
     s.add_argument("--priority", type=int, choices=(0, 1, 2), default=1)
     s.add_argument("--lane", choices=sorted(LANES), default="project")
@@ -855,7 +856,7 @@ def main():
     s = sub.add_parser("set", help="change fields: k=v, one or more")
     s.add_argument("ref"); s.add_argument("kv", nargs="+")
     s.add_argument("--user-verbatim", action="store_true",
-                   help="required for breakpoint / nextAction: marks the text as the user's own words")
+                   help="required for nextAction (and breakpoint): marks the text as the user's own words")
     s.set_defaults(fn=cmd_set)
 
     s = sub.add_parser("step", help="retired (2026-10-29): card steps became to-dos; use todo add / todo done")

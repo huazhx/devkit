@@ -41,7 +41,7 @@ Card fields:
 | `priority` | Priority | `0` is highest, then `1`, `2`. |
 | `due` | Due date | `YYYY-MM-DD`; may be omitted when empty. |
 | `deliverable` | Deliverable | A one-sentence acceptance criterion; must not be written as steps. |
-| `breakpoint` | Breakpoint | The current state that only the user knows and that decays over time; every rewrite appends a `bp` event. |
+| `breakpoint` | Breakpoint | The state only the user knew when pausing; every rewrite appends a `bp` event. **No longer asked for (2026-10-29):** the page neither shows nor asks for it and sends the stored value back unchanged on a switch; old values stay readable in `show`. Do not ask the user for one; a finding worth keeping goes in a note. |
 | `nextAction` | Next action | An action that can be carried out directly; if it is a decision, write it as "Decide: A or B, by criterion C". Every rewrite appends an `na` event. |
 | `waitingOn` | Whom I am waiting on | When the AI sets `blocked`, it must hold content the user provided; empty in other states. For the exception when the user blocks a card on the page themselves, see §3.2. |
 | `blockingOthers` | Who is waiting on me | A person's name or one sentence. The opposite direction to `waitingOn`; when non-empty, it adds 4 to urgency. |
@@ -75,10 +75,10 @@ The following times are derived from events and are no longer stored as separate
 
 `lane` determines what must be filled in:
 
-| Type | Task shape | Information the user must provide | Breakpoint and next action |
+| Type | Task shape | Information the user must provide | Next action |
 |---|---|---|---|
-| `project` | Has an end point, runs across several periods, and is costly to resume after an interruption. | Title, deliverable, breakpoint, next action, what it is waiting on; record the due date if there is one. | The breakpoint keeps what has already been ruled out and why; the next action states an action. |
-| `standing` | Has no end point, only a position in its progress. | Title and a position pointer. | On this type of card the two fields mean the same thing; one position pointer is enough. |
+| `project` | Has an end point, runs across several periods, and is costly to resume after an interruption. | Title, deliverable, next action, what it is waiting on; record the due date if there is one. | The next action states an action; what has been ruled out and why goes in a note. |
+| `standing` | Has no end point, only a position in its progress. | Title and a position pointer. | The next action is the position pointer. |
 | `errand` | A one-off errand that can be finished in one sitting. | Title; the task itself is the deliverable. | Not required, and not asked for. |
 | `claude` | Claude's own checkpoint: the card exists only so that Claude notices a date or runs a check. It is a reminder for Claude, not work the user owes. | Title; `deliverable` says what Claude checks or tells the user; `due` is the day to do it. | Not required, and not asked for. |
 
@@ -98,7 +98,7 @@ User: 「把待办这个事情抽出来，整理一个目录，但是主线是�
 ## 2. The standard flow for every write
 
 1. **Re-read the service's current data** through the CLI or the authenticated API. Read only the target card or the skeleton projection; do not reconstruct the current state from memory, old output or a copy on disk.
-2. Change only the target fields you have just read. Breakpoints, next actions and answers to questions must be the user's own words; see §5.
+2. Change only the target fields you have just read. Next actions (and a breakpoint, if one is ever written) and answers to questions must be the user's own words; see §5.
 3. The CLI sends the change to the service as one standard operation (`POST /api/ops`, see [OPS.md](OPS.md)). When it changes fields, it attaches the old values it just read (`if`); the service checks and executes under one write lock, in one transaction, and writes one line to the operation log.
 4. The success response returned by the service is what counts. A successful write is broadcast automatically to open web pages; there is no need to send a separate notification to the local machine.
 5. On failure, do not write any local copy:
@@ -145,12 +145,12 @@ The project names, track names and text in these examples are placeholders; in r
 
 Decide the `lane` first. A one-off favour a colleague asked for is usually an `errand`: fill in only the title; if the user said who is waiting, fill in `blockingOthers`. A card that only reminds Claude to notice a date or run a check goes in `claude` (§1).
 
-Record only information the user has already given. You may rewrite the user's description as a one-sentence `deliverable` acceptance criterion; if the user gave no due date, breakpoint, next action or waiting-on target, leave those empty. `state` is `ready`; `priority` defaults to `1` and is set to `0` only if the user says it is urgent. Do not invent content to fill out the card.
+Record only information the user has already given. You may rewrite the user's description as a one-sentence `deliverable` acceptance criterion; if the user gave no due date, next action or waiting-on target, leave those empty. `state` is `ready`; `priority` defaults to `1` and is set to `0` only if the user says it is urgent. Do not invent content to fill out the card.
 
 ### 3.2 Switching state
 
-- **At most one card is `running` at a time; it is the user's main line of work.** When the user does something else on the side while waiting for AI output, do not switch cards, and do not remind the user to switch cards for it; anything worth keeping goes into that card's notes (user, 2026-10-21: they often do other things while waiting for AI, and switching cards minute by minute neither matches what actually happens nor is of any use). When the user wants to change the main line to B, or will be away from A for a long time, while A is still running: first ask the user for A's breakpoint and next action, store their words in A and move A back to `ready`; only then can B start. An `errand` does not require a breakpoint or next action; a `standing` card needs only its position pointer. Both the CLI and the server refuse to run a second card at the same time; they do not switch the original card out automatically.
-- A card whose breakpoint was written 7 or more days ago must be re-entered (Re-enter); it must not resume by following the old next action. Before starting, ask the user to rewrite `nextAction`; the AI must not write it for them. Do not force this procedure on errands, which need no breakpoint.
+- **At most one card is `running` at a time; it is the user's main line of work.** When the user does something else on the side while waiting for AI output, do not switch cards, and do not remind the user to switch cards for it; anything worth keeping goes into that card's notes (user, 2026-10-21: they often do other things while waiting for AI, and switching cards minute by minute neither matches what actually happens nor is of any use). When the user wants to change the main line to B, or will be away from A for a long time, while A is still running: first ask the user for A's next action (the first thing to do on coming back), store their words in A and move A back to `ready`; only then can B start. This is the whole switch ritual: do not ask for a breakpoint (2026-10-29); a finding the user wants kept goes into A's notes. An `errand` does not require a next action; a `standing` card needs only its position pointer. Both the CLI and the server refuse to run a second card at the same time; they do not switch the original card out automatically.
+- A card whose next action was written 7 or more days ago (`derived.nextActionAt`; the page shows "Stale Nd" and a Re-enter button) must be re-entered; it must not resume by following the old next action. Before starting, ask the user to rewrite `nextAction`; the AI must not write it for them. The clock restarts only when the text changes. Do not force this procedure on errands or standing cards. (Until 2026-10-29 the clock ran from the breakpoint.)
 - Before the AI sets `blocked`, it must know whom or what the user is waiting on; if the user has not said, ask. When unblocking, clear any `waitingOn` that no longer applies.
 - To deliver, use `python3 boardctl.py set <card> state=done`; the command appends a state event. Delivered cards stay in the service data and are not moved anywhere.
 - On the page, the user can deliver (Deliver) or block (Block) a ready card directly. Blocking from the page allows an empty `waitingOn`, and the page marks it as not filled in; this exception does not allow the AI to guess what the card is waiting on.
@@ -159,7 +159,7 @@ Record only information the user has already given. You may rewrite the user's d
 
 **6-hour fallback:** every 60 seconds the service checks the running card; once it exceeds the cap, the card is moved back to `ready` automatically, appending `{kind: "state", to: "ready", auto: true}`. The event's `ts` is "the time it entered running plus 6 hours", not the time the overrun was noticed; if it is noticed late, `noticedAt` is recorded as well. This way, delays such as a service restart do not create fake sessions of a dozen hours or more.
 
-The cap is defined by `CAP_MS` in `board_schema.py`; `SESSION_CAP_MS` in `web/js/rank.js` must match it. The auto-pause writes **not a single word into the breakpoint or next action**; the page prompts the user to fill them in on return. It is an internal standard operation of the service (`board.sweep`), shares the write lock and transaction with API writes, and is also recorded in the operation log.
+The cap is defined by `CAP_MS` in `board_schema.py`; `SESSION_CAP_MS` in `web/js/rank.js` must match it. The auto-pause writes **not a single word into the next action (or the breakpoint)**; the card shows "Auto-paused", and the user updates the next action on return. It is an internal standard operation of the service (`board.sweep`), shares the write lock and transaction with API writes, and is also recorded in the operation log.
 
 ### 3.3 Recording a line of progress or a stray thought
 
@@ -173,7 +173,7 @@ Handle vague wording from the user in three ways: for omitted information, ask t
 
 ### 3.4 Long-term tasks
 
-The executor must not design the scope and acceptance of a long-term task on its own. First the user discusses the scope with the model responsible for planning, sets up a Research Log if needed, and together they settle the deliverable, breakpoint and next action; only then does the task go on the board. If the user explicitly asks for a card first, create at most a `ready` placeholder card per §3.1, leave `log` empty, and do not present it as finished planning.
+The executor must not design the scope and acceptance of a long-term task on its own. First the user discusses the scope with the model responsible for planning, sets up a Research Log if needed, and together they settle the deliverable and the next action; only then does the task go on the board. If the user explicitly asks for a card first, create at most a `ready` placeholder card per §3.1, leave `log` empty, and do not present it as finished planning.
 
 For a task whose results the user cannot yet judge, the first stage is to build a verifiable acceptance checklist, and only then to execute. Do not substitute "the AI thinks it is done" for acceptance criteria.
 
@@ -188,7 +188,7 @@ u = [6,3,1][priority]
   + (blockingOthers non-empty: 4)
 ```
 
-Having a due date adds 3 by itself, so that a task with an explicit due date is not pushed back merely because another card has been sitting idle for a long time. Breakpoint decay and the expected amount of the user's judgment time a task will take are not urgency terms.
+Having a due date adds 3 by itself, so that a task with an explicit due date is not pushed back merely because another card has been sitting idle for a long time. Next-action staleness and the expected amount of the user's judgment time a task will take are not urgency terms.
 
 Do not reorder the `threads` array to queue tasks. Only within the same urgency band, 1.0 wide, does the page use context affinity to break ties: tasks that share a Research Log with the card `lastActiveId` points to go first. Context affinity does not enter the urgency score and does not cross bands.
 
@@ -212,16 +212,16 @@ Delivered cards remain in the same service data. The Delivered view sorts them b
 
 Do not save delivered cards as notes and then remove them from the board, and do not create a second writable archive. When page cost needs to be kept down, use pagination; do not split off a copy of the task data that could diverge.
 
-## 4. Standards for the three lines
+## 4. Standards for the lines on a card
 
 - **Deliverable `deliverable`:** write an acceptance criterion. Acceptable: "Compare five models under one shared setting and deliver reproducible results"; not acceptable: "Run experiments, organize data, write docs". The AI may rewrite the user's description as an acceptance criterion.
-- **Breakpoint `breakpoint`:** keep the state the user knows, especially what has already been ruled out and on what evidence. You may prompt the user to state "the baseline runs end to end; which failure causes have been ruled out, and on what evidence; which one is suspected now". The AI may only ask; it must not complete or polish the answer for the user.
-- **Next action `nextAction`:** record the direct action the user gave, for example "Check whether max_len in the eval config is 512". If it is a decision, ask the user to state the options and the criterion; do not write it for them as "keep pushing forward".
+- **Breakpoint `breakpoint`:** no longer asked for (2026-10-29). When the user says what has been ruled out and on what evidence, add it as a note on the card in their words (`note`); do not prompt for it as a field.
+- **Next action `nextAction`:** the only line the switch ritual asks for. Record the direct action the user gave, for example "Check whether max_len in the eval config is 512". If it is a decision, ask the user to state the options and the criterion; do not write it for them as "keep pushing forward". The page shows it right after the card title.
 
 ## 5. Red lines
 
 - Do not guess, invent or reuse board state from memory; only data the service has just returned counts.
-- Do not write or polish the user's breakpoint or next action for them; question answers likewise may store only what the user said. If the user's words are rough, store them as they are.
+- Do not write or polish the user's next action (or a breakpoint) for them; question answers likewise may store only what the user said. If the user's words are rough, store them as they are.
 - Do not write a possibility the user left open as a decision. Mark uncertain progress as "to be confirmed"; do not fabricate progress.
 - Do not rewrite an existing Research Log; when something needs recording, only insert a new dated section at the top, keeping the newest first.
 - Do not "discover" tasks on your own from a Research Log, a chat or a notes vault and create cards for them. Creating a card must be grounded in the user's intent.
@@ -265,10 +265,10 @@ A work report keeps only what affects the user's judgment. It can be organized i
 | Box | Content | Limit |
 |---|---|---|
 | Done | The part of the deliverable achieved, or the to-dos ticked. | 1 line. |
-| Stuck on | The current breakpoint the user provided; without the user's own words, only prompt the user to fill it in. | 1 line. |
+| Stuck on | What the user said blocks the card, from its next action or latest note; without the user's own words, only prompt the user to say it. | 1 line. |
 | For you to decide | Questions that have two viable paths and that existing authorization cannot settle. | 3 items, 1 line each. |
 | Done on my own initiative | Things done without asking separately that change later options. | 2 items. |
 
 When all four boxes are empty, do not report just for the sake of reporting. Routine file reading, API wiring, code style and the trial-and-error process do not go into the report. Implementation details with only one viable path are handled by the AI; only a fork that affects the choice is handed to the user to decide.
 
-Ask proactive questions only in passing, when the user is already discussing a task with the AI; at most two cards at a time, chosen in this order: the card that just left `running`; cards whose breakpoint was written more than 7 days ago; cards with required fields left empty. **Never press for a breakpoint or next action on an `errand`.** Do not scan and interrogate card by card, and do not interrupt the user just to ask.
+Ask proactive questions only in passing, when the user is already discussing a task with the AI; at most two cards at a time, chosen in this order: the card that just left `running`; cards whose next action was written more than 7 days ago; cards with required fields left empty. **Never ask for a breakpoint; never press for a next action on an `errand`.** Do not scan and interrogate card by card, and do not interrupt the user just to ask.

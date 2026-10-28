@@ -240,9 +240,10 @@ def log_event(c, e):
 def set_text(c, field, value, ts, reaffirm=False):
     """Change breakpoint / nextAction: write only when the value really changed, and record a new-value event. Returns whether it changed.
 
-    reaffirm: a non-empty breakpoint left unchanged during a switch is recorded too; going through the
-    switch ritual re-confirms it, and the "stale breakpoint" timer restarts from this moment (same
-    meaning as reaffirm in rank.js setText)."""
+    reaffirm: a non-empty breakpoint left unchanged during a switch is recorded too (going through the
+    switch ritual re-confirms it). Since 2026-10-29 the page neither shows nor asks for the breakpoint and
+    sends the stored one back unchanged, and "stale" is timed from the next action (rank.js isStale),
+    which is recorded only when its text changes."""
     kind = {"breakpoint": "bp", "nextAction": "na"}[field]
     value = value or ""
     if value == (c.get(field) or "") and not (reaffirm and value):
