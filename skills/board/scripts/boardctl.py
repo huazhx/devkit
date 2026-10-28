@@ -17,8 +17,7 @@ Usage
   boardctl.py show example-project --no-log   # do not read events
   boardctl.py note example-project "Finished the synthetic-data check"
   boardctl.py set example-project due=2027-01-15 priority=0
-  boardctl.py step example-project Validate 2   # tick step 2 (--undone to untick)
-  boardctl.py plan example-project --set plan.json   # replace the whole plan (step names ≤ 30 characters, details go in detail)
+  boardctl.py plan example-project      # the card's open questions (card steps are retired: to-dos are the checklist)
   boardctl.py q example-project 1 --decide "Take option A" --user-verbatim
   boardctl.py time --days 7             # where the time went (same rules as the page's "Time" view)
   boardctl.py todo add "Email X about Y" card=example-card due=2026-11-01   # a to-do; card / when / due / wait are optional
@@ -365,6 +364,9 @@ def cmd_show(a):
                                         "trashedAt") if full.get(k)}
     if card.get("state") == "trashed" and full.get("restoreTo"):
         derived["restoreTo"] = full["restoreTo"]
+    if isinstance(card.get("retiredSteps"), dict):
+        # the steps kept only so the 2026-10-29 change can be undone: not live, so not shown as steps
+        card = dict(card, retiredSteps=retired_line(card))
     if a.no_log:
         # events is an untruncated ledger and should not be dumped into the context whole; use `time` for durations
         card = {k: v for k, v in card.items() if k != "events"}
@@ -377,8 +379,19 @@ def cmd_show(a):
     print(json.dumps(dict(card, derived=derived), ensure_ascii=False, indent=2))
 
 
+def retired_line(card):
+    r = card.get("retiredSteps") or {}
+    steps = sum(len(t.get("steps") or []) for t in r.get("tracks") or [])
+    from zoneinfo import ZoneInfo   # the user's day, as in local_today()
+    tz = ZoneInfo(os.environ.get("BOARD_TZ", "Asia/Shanghai"))
+    at = datetime.fromtimestamp(r["at"] / 1000, tz).strftime("%Y-%m-%d") if r.get("at") else "?"
+    return (f"{steps} card steps retired on {at} ({len(r.get('todos') or [])} became to-dos: todo list); "
+            "kept on the card only so the change can be undone")
+
+
 def cmd_plan(a):
-    card = resolve(load(), a.ref)
+    board = load()
+    card = resolve(board, a.ref)
     plan = card.get("plan")
     if a.set:
         # Replace this card's whole plan (one card.update with if: if the plan was changed elsewhere after the read, it is refused, not overwritten)
@@ -391,21 +404,21 @@ def cmd_plan(a):
         result = op("card.update", {"id": card["id"], "set": {"plan": new}, "if": {"plan": plan}})
         print(f"Updated the plan of '{card['title']}'. {written(result)}")
         return
-    if not plan:
-        print(f"'{card['title']}' has no plan field")
-        return
-    for tr in plan.get("tracks", []):
-        if tr.get("kind") == "flow":
-            done = sum(1 for s in tr["steps"] if s.get("done"))
-            print(f"flow  {tr['name']}   {done}/{len(tr['steps'])}")
-            for i, s in enumerate(tr["steps"], 1):
-                print(f"        {i}. [{'x' if s.get('done') else ' '}] {s['t']}")
-                if s.get("detail"):
-                    print(f"             {s['detail']}")
-        else:
+    tracks = (plan or {}).get("tracks", [])
+    for tr in tracks:
+        if tr.get("kind") == "q":
             print(f"q     {tr['name']}   [{tr.get('status')}]"
                   + (f"\n        → {tr['answer']}" if tr.get("answer") else ""))
-    print(f"\nsummaryAt={plan.get('summaryAt')}")
+    flows = [t for t in tracks if t.get("kind") == "flow"]
+    if flows:   # only on a card not yet migrated (e.g. after importing an old backup)
+        print(f"{sum(len(t.get('steps') or []) for t in flows)} card steps not yet retired; "
+              f"run: retire-steps '{card['title']}'")
+    if card.get("retiredSteps"):
+        print(retired_line(card))
+    mine = [i for i in board.get("inbox", []) if i.get("card") == card["id"] and not i.get("doneAt")]
+    print(f"{len(mine)} open to-dos belong to this card (todo list)")
+    if not tracks and not card.get("retiredSteps"):
+        print(f"'{card['title']}' has no questions")
 
 
 def cmd_time(a):
@@ -677,23 +690,44 @@ def cmd_set(a):
 
 
 def cmd_step(a):
-    card = resolve(load(), a.ref)
-    plan = card.get("plan")
-    if not plan:
-        die(f"'{card['title']}' has no plan field")
-    flows = [t for t in plan.get("tracks", []) if t.get("kind") == "flow"]
-    hits = [t for t in flows if t["name"] == a.track] or \
-           [t for t in flows if a.track.lower() in t["name"].lower()]
-    if len(hits) != 1:
-        die("The track must match exactly one:\n" + "\n".join(f"  {t['name']}" for t in flows))
-    steps = hits[0].get("steps") or []
-    if not 1 <= a.n <= len(steps):
-        die(f"'{hits[0]['name']}' has only {len(steps)} steps")
-    # Send this step's text: if the track was reordered between the read and the write, the server refuses because the text does not match, instead of ticking the wrong step
-    result = op("plan.step", {"id": card["id"], "track": hits[0]["name"], "step": a.n - 1,
-                              "done": not a.undone, "if": {"text": steps[a.n - 1].get("t")}})
-    print(f"Updated '{card['title']}': {hits[0]['name']} step {a.n} → "
-          f"{'not done' if a.undone else 'done'}; {written(result)}")
+    """Retired with card steps (2026-10-29): to-dos are the only checklist. Kept so an old habit gets the way forward."""
+    ref = f"'{a.ref}'" if a.ref else "<card>"
+    die("Card steps are retired (2026-10-29): to-dos are the only checklist.\n"
+        f"  Add one:  todo add \"<text>\" card={ref}\n"
+        "  Tick one: todo done <to-do>   (todo list shows a card's to-dos; --undo unticks)")
+
+
+def cmd_retire_steps(a):
+    """One-time migration (2026-10-29): every card still carrying steps goes through plan.retireSteps on the server,
+    which makes the open steps of a live card into to-dos and moves the steps to retiredSteps (the rules are there)."""
+    board = load()
+    if a.all == bool(a.ref):
+        die("Give one card, or --all")
+    cards = board["threads"] if a.all else [resolve(board, a.ref)]
+    todo = [c for c in cards if any(t.get("kind") == "flow" for t in (c.get("plan") or {}).get("tracks", []))]
+    if not todo:
+        print("No card carries steps; nothing to do.")
+        return
+    for c in todo:
+        flows = [t for t in c["plan"]["tracks"] if t.get("kind") == "flow"]
+        live = c.get("state") in ("ready", "running", "blocked")
+        open_steps = [st.get("t") for t in flows for st in t.get("steps") or [] if not st.get("done")]
+        if a.dry_run:
+            print(f"{c['id'][:8]}  {c.get('state'):<8} {c['title']}: {len(flows)} tracks, "
+                  + (f"{len(open_steps)} open steps → to-dos" if live else "steps only moved (not a live card)"))
+            for t in open_steps if live else []:
+                print(f"          + {t}")
+            continue
+        result = op("plan.retireSteps", {"id": c["id"], "today": local_today()})
+        r = result.get("result") or {}
+        print(f"{c['id'][:8]}  {c['title']}: {r.get('tracks', 0)} tracks moved to retiredSteps, "
+              f"{len(r.get('todos') or [])} to-dos" + ("; step details noted on the card" if r.get("note") else ""))
+        for t in r.get("todos") or []:
+            print(f"          + {t['text']}" + (f"   [when {t['when']}]" if t.get("when") else ""))
+    if a.dry_run:
+        print("\nDry run: nothing written.")
+    else:
+        print(written(result))
 
 
 def cmd_q(a):
@@ -780,9 +814,9 @@ def main():
     group.add_argument("--events", type=int, help="show only the last N events")
     s.set_defaults(fn=cmd_show)
 
-    s = sub.add_parser("plan", help="show the plan's tracks and steps; --set FILE replaces it whole (- reads stdin)")
+    s = sub.add_parser("plan", help="show the card's questions (q tracks); --set FILE replaces them whole (- reads stdin)")
     s.add_argument("ref")
-    s.add_argument("--set", metavar="FILE", help="JSON of the new plan ({\"tracks\": [...]}); step names ≤ 30 characters, details go in detail")
+    s.add_argument("--set", metavar="FILE", help="JSON of the new plan ({\"tracks\": [q tracks]}); card steps are retired, use todo add")
     s.set_defaults(fn=cmd_plan)
 
     s = sub.add_parser("time", help="where the time went (same rules as the page's \"Time\" view)")
@@ -824,10 +858,16 @@ def main():
                    help="required for breakpoint / nextAction: marks the text as the user's own words")
     s.set_defaults(fn=cmd_set)
 
-    s = sub.add_parser("step", help="tick / untick one step of the plan")
-    s.add_argument("ref"); s.add_argument("track"); s.add_argument("n", type=int)
+    s = sub.add_parser("step", help="retired (2026-10-29): card steps became to-dos; use todo add / todo done")
+    s.add_argument("ref", nargs="?"); s.add_argument("rest", nargs="*")
     s.add_argument("--undone", action="store_true")
     s.set_defaults(fn=cmd_step)
+
+    s = sub.add_parser("retire-steps", help="maintenance: turn the steps a card still carries into to-dos (server rules)")
+    s.add_argument("ref", nargs="?")
+    s.add_argument("--all", action="store_true", help="every card that still carries steps")
+    s.add_argument("--dry-run", action="store_true", help="list what would change; write nothing")
+    s.set_defaults(fn=cmd_retire_steps)
 
     s = sub.add_parser("q", help="change one q track of the plan")
     s.add_argument("ref"); s.add_argument("n", type=int)

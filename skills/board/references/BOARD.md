@@ -48,7 +48,8 @@ Card fields:
 | `lane` | Task type | `project` / `standing` / `errand` / `claude`; determines the required information and how the card is queued. |
 | `cadence` | Expected interval, in days, for a standing task | Integer number of days, used only by `standing`; empty for other types. |
 | `log` | Research Log link | E.g. `[[Research notes]]`; multiple links are joined with ` · `. Linking a notes vault is not a prerequisite for running the board. |
-| `plan` | Progress summary, i.e. the global position of this thread | `{ "summaryAt": epoch-ms, "tracks": [...] }`; when there is no summary, the field is not set. Track format: see §3.6. |
+| `plan` | Open questions of this thread | `{ "summaryAt": epoch-ms, "tracks": [...] }`, the tracks being questions (`q`); when there are none, the field is not set. Card steps (`flow` tracks) are retired since 2026-10-29: to-dos are the only checklist (§1.1, §3.6). |
+| `retiredSteps` | The steps the card carried before 2026-10-29 | `{ "at", "tracks", "todos" }`, written only by `plan.retireSteps`; kept so the change can be undone. Not live: never tick, copy or report them as steps. |
 | `createdAt` / `touchedAt` | Creation time / time of latest activity | Unix milliseconds. Every card edit refreshes `touchedAt`. |
 | `events` | Ledger of notes, field rewrites and state changes | Ascending by `ts`, append-only, unlimited, never truncated. The only exception is the user deleting their own note on the page. |
 
@@ -87,12 +88,12 @@ Standing cards always go at the end of the ready queue, are shown semi-transpare
 
 User: 「把待办这个事情抽出来，整理一个目录，但是主线是卡片依旧只有一个，待办可以属于某些卡片，但不是非要有主线」.
 
-- **What goes where.** A card's plan steps are that card's own progress points. A small thing done in one sitting (an email, a booking, a form) is a to-do in the catalog, never also a step: one copy per thing. A to-do may belong to a card (`card`) or to none; it never becomes the running card. If one grows into a line of work, `inbox.promote` makes it a card.
-- **Who writes what.** The user adds a line (page input or by telling Claude) and ticks what is done. Claude sorts new entries (`card`, `when`, `due`, `wait`) and writes `pick`: at the user's first message of the day it picks at most 6 open to-dos for that day (`todo pick`, day = the user's local day), ranks them and writes one reason each, by these rules: an outside date that cannot be made up, counted back to a start day; things that wait on someone's reply go out first; what moves the current stage goal before what does not; within a tier, small first; standing work stays out. A to-do left unpicked for several days running gets one keep-or-drop question. The user never has to rank.
-- **On the page.** "Today" (under Running) shows the day's picks in order with their reasons; ticked ones fold into "done today". The "To-dos" zone keeps the one-line input and folds the whole catalog, grouped by card, then "No card", "Later" (`when` after today) and "Waiting on someone". The Running panel lists the to-dos that belong to its card, filtered from the catalog, not copied.
+- **What goes where.** To-dos are the only checklist. Anything to do, small or a step of a card's work, is a to-do in the catalog; a to-do may belong to a card (`card`) or to none, and it never becomes the running card. If one grows into a line of work, `inbox.promote` makes it a card. Card steps are retired (2026-10-29; the user: 「有了这个 todos，那个 progress 就可以不要了」, after the Running panel showed a card's steps and its to-dos as two checklists): the server refuses `flow` tracks and `plan.step`, and `plan.retireSteps` turned the open steps of every live card into to-dos of that card (`retire-steps` in the CLI; their details went into one note on the card). A card's `plan` keeps only questions (§3.6).
+- **Who writes what.** The user adds a line (the page's one capture input, or by telling Claude), ticks what is done (the square box on the left of a to-do) and may move a to-do to another card or to none (its card chip). Claude sorts new entries (`card`, `when`, `due`, `wait`) and writes `pick`: at the user's first message of the day it picks at most 6 open to-dos for that day (`todo pick`, day = the user's local day), ranks them and writes one reason each, by these rules: an outside date that cannot be made up, counted back to a start day; things that wait on someone's reply go out first; what moves the current stage goal before what does not; within a tier, small first; standing work stays out. A to-do left unpicked for several days running gets one keep-or-drop question. The user never has to rank.
+- **On the page.** From the top: Running, the one capture input, "Today" (the day's picks in order with their reasons; hidden when nothing is picked), Ready, Blocked, For Claude, and at the end the "To-dos" zone, which folds the whole catalog, grouped by card, then "No card", "Later" (`when` after today) and "Waiting on someone" (user, 2026-10-29: the input right above Today, the whole list last). A to-do ticked today stays in place, struck through, until the day ends. The Running panel lists the to-dos that belong to its card, filtered from the catalog, not copied, with an input that adds one to that card.
 - **CLI.** `todo list [--today]`, `todo add "<text>" [card=… when=… due=… wait=…]`, `todo set <to-do> key=value…`, `todo pick <to-do> <rank> "<why>" [--day …]`, `todo unpick <to-do>`, `todo done <to-do> [--undo]`. `<to-do>` is an id prefix or a piece of its text. `inbox "<text>"` still adds a to-do.
 
-**The `claude` lane holds Claude's own checkpoints (user, 2026-10-26: "Open a new section for cards like these, after Inbox, collapsed by default. You read them yourself; looking at them tires me").** Claude reads them from the CLI; the user does not need to look at them. `list`, `list --due` and `show` return them like any other card, and `list --lane claude` lists only them; Claude acts on one when its `due` has come. On the page, live ones (`ready` or `blocked`) appear only in the "For Claude" zone after Inbox, which is collapsed on every load; they are not in Ready or Blocked, take no part in urgency ranking, carry no urgency tint, u value or due chip, and are not offered under a to-do's "Belongs to a card". A `running`, delivered or trashed one shows where any card in that state would. When Claude creates such a card, it uses `--lane claude`; work the user owes never goes in this lane, and a card the user keeps for their own ideas (for example a `standing` idea pool) stays where it is.
+**The `claude` lane holds Claude's own checkpoints (user, 2026-10-26: "Open a new section for cards like these, after Inbox, collapsed by default. You read them yourself; looking at them tires me"; since the to-do catalog moved to the end of the page on 2026-10-29 the zone sits after Blocked).** Claude reads them from the CLI; the user does not need to look at them. `list`, `list --due` and `show` return them like any other card, and `list --lane claude` lists only them; Claude acts on one when its `due` has come. On the page, live ones (`ready` or `blocked`) appear only in the "For Claude" zone after Blocked, which is collapsed on every load; they are not in Ready or Blocked, take no part in urgency ranking, carry no urgency tint, u value or due chip, and are not offered by a to-do's card chip. A `running`, delivered or trashed one shows where any card in that state would. When Claude creates such a card, it uses `--lane claude`; work the user owes never goes in this lane, and a card the user keeps for their own ideas (for example a `standing` idea pool) stays where it is.
 
 ## 2. The standard flow for every write
 
@@ -127,7 +128,8 @@ python3 boardctl.py inbox 'An idea that does not belong to a known card yet'
 python3 boardctl.py inbox --list --limit 20
 python3 boardctl.py create 'A new task the user raised' --lane errand
 python3 boardctl.py set 'Example project' due=2027-01-15
-python3 boardctl.py step 'Example project' Verify 2
+python3 boardctl.py todo add 'Run the verification' card='Example project'
+python3 boardctl.py todo done 'Run the verification'
 python3 boardctl.py q 'Example project' 1 --decide 'A decision the user gave in person' --user-verbatim
 ```
 
@@ -165,7 +167,7 @@ The cap is defined by `CAP_MS` in `board_schema.py`; `SESSION_CAP_MS` in `web/js
 
 If it is something to do and you are not sure which card it belongs to, use `python3 boardctl.py todo add 'text'` without `card=`; do not guess where it belongs. `inbox.move` (append an entry to a card as a note and remove it) still exists for the CLI and old clients; the page no longer offers it, because linking a to-do to a card (`card`) keeps it a to-do.
 
-When writing any note, deliverable or progress summary, the first mention of a file, person, meeting or conclusion must be made clear in that same sentence. A reader who has only this card must still be able to resolve every reference. Do not write things like "the old card" or "the approach from last time" that cannot be checked on their own.
+When writing any note, deliverable or question, the first mention of a file, person, meeting or conclusion must be made clear in that same sentence. A reader who has only this card must still be able to resolve every reference. Do not write things like "the old card" or "the approach from last time" that cannot be checked on their own.
 
 Handle vague wording from the user in three ways: for omitted information, ask the user and then fill it in; mark things the user has not yet decided as undecided; keep the questioning tone of statements in which the user deliberately left room. Never store "could we add X?" as "decided to add X".
 
@@ -192,36 +194,17 @@ Do not reorder the `threads` array to queue tasks. Only within the same urgency 
 
 Do not clean up, merge or polish existing `events` entries.
 
-### 3.6 Recomputing the progress summary
+### 3.6 Questions, and the retired card steps
 
-`breakpoint` is local state that decays and that only the user can write; `plan` is the stable global position, which the AI may draft from text already on the card and hand to the user for correction.
+A card's `plan` holds only its open **questions**: `{kind: "q", name, status: "open" | "decided", answer?, at?, blockedBy?}`, for things where you must get a result before you know which way to go. No percentage is shown; the page lists them under "Questions" only when a card has one.
 
-Build a summary only for a `project` that spans weeks. A `standing` card has only a position pointer, and an `errand` needs no summary. A card without a `plan` is normal.
+- A question's `answer` can only be something the user said; if the user has not decided, it is `open`. Answer with `python3 boardctl.py q <card> <n> --decide '…' --user-verbatim`.
+- The user's tentative ideas and reservations are recorded as they are, as `open`, keeping the questioning tone. Do not force parallel questions into a fixed chain of stages.
+- To write the questions whole, use `python3 boardctl.py plan <card> --set plan.json` (content `{"tracks": [...]}`); if the plan was changed elsewhere after you read it, the write is rejected rather than overwriting it.
 
-`tracks` consists of flow tracks and questions, with no order among them:
+**Card steps are retired (2026-10-29).** Until then a `flow` track held tickable steps ("Progress", a quest tracker on the Running panel); now anything to do is a to-do (§1.1). The server refuses a `flow` track in `card.create` / `card.update` and the `plan.step` operation (422, naming the way forward); the CLI `step` command only prints it. What used to go into a step goes into a to-do of the card: `todo add '<text>' card=<card>`, ticked with `todo done`. For an exploratory thread, the old rule still holds in to-do form: write down only the next one or two things that are already settled, and write a direction not yet thought through as a `q`, not as a to-do. The steps a card carried are kept in its `retiredSteps` for undo; `plan <card>` and `show` summarize them in one line. If an old backup brings steps back, run `python3 boardctl.py retire-steps --all --dry-run`, then without `--dry-run`.
 
-| Type | When to use | Shape |
-|---|---|---|
-| `flow` | What it should produce is known before it is done, for example checking items against a list that is already fixed. | `{kind: "flow", name, steps: [{t, done, detail?}]}`, shown on the page as a task tracker (one item per row). |
-| `q` | You must get a result first before you know which way to go. | `{kind: "q", name, status: "open" \| "decided", answer?, at?, blockedBy?}`; no percentage is shown. |
-
-Do not disguise a question with an unknown outcome as a step that can be ticked off, and do not force parallel questions into a fixed chain of stages.
-
-- A question's `answer` can only be something the user said; if the user has not decided, it is `open`.
-- The user's tentative ideas and reservations are recorded as they are, as `open`, keeping the questioning tone.
-- Step names use text already on the card; do not invent steps to be completed out of thin air.
-- A step name is a short name for ticking off: it starts with a verb and covers one thing; aim for 15 characters or fewer; the server limit is 30 characters. Conditions, reasons, dates, criteria and sources go into that step's `detail`, which the page folds under "Details" below the track; do not put them in parentheses in `t` (user, 2026-10-21: "short and sharp, the very concise kind you tick off").
-- The page draws a flow track as a task tracker: one item per row; the first unfinished item is the current target; finished items fold into "N done"; no total and no progress bar are shown. The user can add a step directly on the page (Enter) or delete a step (click twice).
-- Write a thread in one of two ways (user, 2026-10-21: "some tasks just don't have a clear plan…the steps in between may still change"):
-  - **Checklist type**: what needs doing is clear in advance, for example wrapping up a paper submission. List all the known steps.
-  - **Exploratory type**: the next step depends on the result of the previous one, for example planning an internship. List only the next one or two items that are already settled, and add the next item after finishing one; write a direction that has not been thought through yet as a `q`; do not invent steps to fill out a list. This is rolling wave planning from project management: near-term work is written in detail, far-off work stays as questions, and the plan is filled in as you go.
-  - When the AI drafts an exploratory thread, it lists at most two items that are already settled; when the next step is unclear, ask the user, or write it as a `q`.
-- To write a whole plan, use `python3 boardctl.py plan <card> --set plan.json` (content `{"tracks": [...]}`); if the plan was changed elsewhere after you read it, the write is rejected rather than overwriting it.
-- `summaryAt` is refreshed only when the track contents are actually checked or changed, never as a side effect of editing other fields.
-
-When the user changes the breakpoint or next action, check the summary while you are at it. When the page shows "Summary behind", check it first. Before ticking a step, read `python3 boardctl.py plan <card>`; question answers still require the user's own words and `--user-verbatim`.
-
-`roadmap` is retired; do not reintroduce it. The global position is carried by `plan`.
+`roadmap` is retired; do not reintroduce it, nor card steps.
 
 ### 3.7 Delivered cards
 
@@ -281,7 +264,7 @@ A work report keeps only what affects the user's judgment. It can be organized i
 
 | Box | Content | Limit |
 |---|---|---|
-| Done | The part of the deliverable achieved, or the flow-track steps completed. | 1 line. |
+| Done | The part of the deliverable achieved, or the to-dos ticked. | 1 line. |
 | Stuck on | The current breakpoint the user provided; without the user's own words, only prompt the user to fill it in. | 1 line. |
 | For you to decide | Questions that have two viable paths and that existing authorization cannot settle. | 3 items, 1 line each. |
 | Done on my own initiative | Things done without asking separately that change later options. | 2 items. |
